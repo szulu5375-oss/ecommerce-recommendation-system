@@ -22,7 +22,10 @@ st.subheader("E-commerce Product Recommendation System")
 # -----------------------------
 @st.cache_data
 def load_data():
-    data = pd.read_csv("products.csv")
+    import os 
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(BASE_DIR,"products.csv")
+    data = pd.read_csv(csv_path)
     return data
 
 df = load_data()
