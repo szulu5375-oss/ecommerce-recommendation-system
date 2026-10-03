@@ -57,13 +57,13 @@ st.markdown(
         padding: 2.1rem 1.25rem 3rem;
     }
     .st-key-home-search [data-testid="stTextInput"] input {
-        min-height: 3.25rem;
-        padding: 0.7rem 1.1rem;
+        min-height: 4rem;
+        padding: 0.9rem 1.25rem;
         border: 2px solid var(--peach);
         border-radius: 999px;
         background: #fff;
         color: var(--ink);
-        font-size: 1rem;
+        font-size: 1.15rem;
         box-shadow: 0 4px 14px rgba(84, 26, 46, 0.12);
     }
     .st-key-home-search [data-testid="stTextInput"] input::placeholder {
