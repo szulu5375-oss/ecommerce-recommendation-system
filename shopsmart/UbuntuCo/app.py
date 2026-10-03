@@ -757,10 +757,6 @@ elif st.session_state.page == "Products":
     if search:
         results = results[results["Name"].str.contains(search, case=False, regex=False)]
     render_product_cards(results.reset_index(drop=True))
-    st.dataframe(
-        with_rand_prices(results[["Name", "Category", "Price", "DiscountPercent"]]),
-        use_container_width=True,
-    )
 
 elif st.session_state.page == "Popular Products":
     st.header("All Popular Products")
