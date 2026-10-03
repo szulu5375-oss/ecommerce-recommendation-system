@@ -56,11 +56,15 @@ st.markdown(
         max-width: 1060px;
         padding: 2.1rem 1.25rem 3rem;
     }
+    .st-key-home-search {
+        width: calc(100% + 2rem);
+        margin-left: -1rem;
+    }
     .st-key-home-search [data-testid="stTextInput"] input {
-        min-height: 4rem;
-        padding: 0.9rem 1.25rem;
+        min-height: 5rem;
+        padding: 1rem 1.25rem;
         border: 2px solid var(--peach);
-        border-radius: 999px;
+        border-radius: 0.85rem;
         background: #fff;
         color: var(--ink);
         font-size: 1.15rem;
@@ -318,6 +322,7 @@ st.markdown(
     .st-key-sidebar-brand .shop-brand { font-size: 2.5rem; }
     @media (max-width: 640px) {
         div.block-container { padding: 0.65rem 0.8rem 2rem; }
+        .st-key-home-search { width: 100%; margin-left: 0; }
         .hero { min-height: 205px; padding: 1.2rem; }
         .hero-devices { font-size: 3.8rem; }
         .hero-copy { max-width: 65%; }
