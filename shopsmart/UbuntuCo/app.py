@@ -90,21 +90,14 @@ st.markdown(
     }
     .shop-brand span { color: var(--red); }
     .header-icon { font-size: 1.4rem; }
-    .st-key-header-cart button {
-        border: 0;
-        background: transparent;
-        color: var(--ink);
-        font-size: 1.25rem;
-    }
-    .st-key-header-cart button:hover {
-        border: 0;
-        background: #ffede5;
-        color: var(--red);
-    }
     [data-testid="stSidebar"] {
         background: var(--ink);
         border-right: 1px solid var(--border);
         color: #fff4ef;
+    }
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stExpandSidebarButton"] {
+        display: none;
     }
     [data-testid="stSidebar"] > div {
         padding-top: 1.1rem;
@@ -147,65 +140,6 @@ st.markdown(
     [data-testid="stSidebar"] [class*="st-key-sidebar-nav-active"] button:hover {
         border-color: var(--wine);
         background: var(--wine);
-        color: #fff4ef;
-    }
-    div[class*="st-key-page-nav-"] button {
-        min-height: 3.2rem;
-        padding: 0.35rem;
-        border: 1px solid var(--border);
-        border-radius: 1.15rem;
-        background: #fff;
-        color: var(--navy);
-        font-size: 1.2rem;
-    }
-    div[class*="st-key-page-nav-"] button:hover {
-        border-color: var(--peach);
-        background: #ffede5;
-        color: var(--wine);
-    }
-    div[class*="st-key-page-nav-active-"] button {
-        border-color: var(--red);
-        background: var(--red);
-        color: #fff4ef;
-    }
-    div[class*="st-key-page-nav-active-"] button:hover {
-        border-color: var(--wine);
-        background: var(--wine);
-        color: #fff4ef;
-    }
-    .st-key-top-navigation {
-        position: sticky;
-        top: 0;
-        z-index: 1000;
-        padding: 0.35rem 0 0.55rem;
-        background: var(--ink);
-        border-bottom: 2px solid var(--red);
-        border-radius: 1rem;
-        padding-left: 0.7rem;
-        padding-right: 0.7rem;
-    }
-    .st-key-top-navigation .shop-brand {
-        color: #fff4ef;
-    }
-    .st-key-top-navigation .shop-brand span {
-        color: var(--peach);
-    }
-    .st-key-top-navigation .st-key-header-cart button {
-        color: var(--peach);
-    }
-    .st-key-top-navigation div[class*="st-key-page-nav-"] button {
-        border-color: var(--slate);
-        background: var(--navy);
-        color: #fff4ef;
-    }
-    .st-key-top-navigation div[class*="st-key-page-nav-"] button:hover {
-        border-color: var(--peach);
-        background: var(--slate);
-        color: var(--peach);
-    }
-    .st-key-top-navigation div[class*="st-key-page-nav-active"] button {
-        border-color: var(--peach);
-        background: var(--red);
         color: #fff4ef;
     }
     [data-testid="stSidebar"] .shop-brand {
@@ -653,10 +587,6 @@ def change_cart_quantity(product_id, amount):
     st.session_state.cart = cart
 
 
-def open_cart():
-    navigate_to_page("Cart")
-
-
 def open_promotions():
     navigate_to_page("Promotions")
 
@@ -712,39 +642,6 @@ for page in pages:
             args=(page,),
             use_container_width=True,
         )
-
-with st.container(key="top-navigation"):
-    header_left, header_center, header_right = st.columns([1, 4, 1])
-    with header_center:
-        st.markdown(
-            '<div class="shop-brand" style="text-align:center">Shop<span>Smart</span></div>',
-            unsafe_allow_html=True,
-        )
-    with header_right:
-        cart_count = sum(st.session_state.cart.values())
-        with st.container(key="header-cart"):
-            st.button(
-                f"🛒 {cart_count}",
-                key="open_cart",
-                on_click=open_cart,
-                help="Open your cart",
-                use_container_width=True,
-            )
-
-    page_nav_columns = st.columns(len(pages))
-    for index, page in enumerate(pages):
-        nav_key = "page-nav-active" if st.session_state.page == page else "page-nav"
-        with page_nav_columns[index]:
-            with st.container(key=f"{nav_key}-{page.lower().replace(' ', '-')}"):
-                st.button(
-                    "",
-                    icon=f":material/{page_icons[page]}:",
-                    key=f"page_navigate_{page.lower().replace(' ', '_')}",
-                    on_click=navigate_to_page,
-                    args=(page,),
-                    help=page,
-                    use_container_width=True,
-                )
 
 if st.session_state.page == "Home":
     with st.container(key="home-search"):
