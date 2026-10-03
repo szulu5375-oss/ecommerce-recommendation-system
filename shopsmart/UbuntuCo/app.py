@@ -604,6 +604,8 @@ if "page" not in st.session_state:
     st.session_state.page = "Home"
 if "category_filter" not in st.session_state:
     st.session_state.category_filter = ""
+elif st.session_state.category_filter not in CATEGORIES:
+    st.session_state.category_filter = ""
 if "cart" not in st.session_state:
     st.session_state.cart = {}
 if "recommended_product_ids" not in st.session_state:

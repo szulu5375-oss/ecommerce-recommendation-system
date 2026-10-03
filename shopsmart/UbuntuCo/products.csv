@@ -2,9 +2,9 @@ ProductID,Name,Category,Price,Description,DiscountPercent
 1,Wireless Mouse,Electronics,250,Ergonomic wireless mouse for office and gaming,10
 2,Gaming Keyboard,Electronics,650,RGB mechanical keyboard with fast response,0
 3,USB Headphones,Electronics,450,Noise cancelling wired headphones,15
-4,Running Shoes,Fashion,899,Comfortable lightweight sports shoes,20
-5,Leather Jacket,Fashion,1200,Stylish black leather jacket,0
-6,Blue Jeans,Fashion,550,Slim fit casual denim jeans,0
+4,Running Shoes,Footwear,899,Comfortable lightweight sports shoes,20
+5,Leather Jacket,Women's Clothing,1200,Stylish black leather jacket,0
+6,Blue Jeans,Women's Clothing,550,Slim fit casual denim jeans,0
 7,Coffee Maker,Home,780,Automatic coffee brewing machine,0
 8,Blender,Home,620,High speed kitchen blender for smoothies,0
 9,Office Chair,Furniture,1450,Adjustable ergonomic office chair,10
@@ -35,4 +35,4 @@ ProductID,Name,Category,Price,Description,DiscountPercent
 34,Electric Kettle,Home,399,Quick boiling kettle with automatic shutoff,0
 35,Bookshelf,Furniture,1190,Compact bookshelf with multiple storage shelves,0
 36,Floor Lamp,Furniture,890,Modern floor lamp for living rooms and bedrooms,0
-37,Casual T-Shirt,Fashion,299,Soft everyday t-shirt with a relaxed fit,0
+37,Casual T-Shirt,Women's Clothing,299,Soft everyday t-shirt with a relaxed fit,0
