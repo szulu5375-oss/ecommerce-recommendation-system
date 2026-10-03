@@ -754,7 +754,7 @@ if st.session_state.page == "Home":
             label_visibility="collapsed",
         )
     banner_image = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "Images", "banner.jpeg")
+        os.path.join(os.path.dirname(__file__), "..", "..", "Images", "Banner.jpeg")
     )
     banner_background = ""
     if os.path.isfile(banner_image):
