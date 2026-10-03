@@ -233,6 +233,24 @@ st.markdown(
         border: 0;
         box-shadow: 0 0 0 2px rgba(181, 26, 40, 0.22);
     }
+    div[class*="st-key-category-more"] button {
+        width: 100%;
+        height: 7rem;
+        min-height: 7rem;
+        border: 0;
+        background: transparent;
+        color: var(--red);
+        box-shadow: none;
+    }
+    div[class*="st-key-category-more"] button:hover {
+        border: 0;
+        background: rgba(255,165,134,0.24);
+        color: var(--wine);
+        box-shadow: none;
+    }
+    div[class*="st-key-category-more"] button [data-testid="stIconMaterial"] {
+        font-size: 2rem;
+    }
     div[class*="st-key-product-card-"] {
         box-sizing: border-box;
         height: 330px;
@@ -582,6 +600,10 @@ def navigate_to_category(category):
     st.session_state.category_filter = category
 
 
+def toggle_categories():
+    st.session_state.show_all_categories = not st.session_state.show_all_categories
+
+
 def change_cart_quantity(product_id, amount):
     cart = dict(st.session_state.cart)
     new_quantity = cart.get(product_id, 0) + amount
@@ -606,6 +628,8 @@ if "category_filter" not in st.session_state:
     st.session_state.category_filter = ""
 elif st.session_state.category_filter not in CATEGORIES:
     st.session_state.category_filter = ""
+if "show_all_categories" not in st.session_state:
+    st.session_state.show_all_categories = False
 if "cart" not in st.session_state:
     st.session_state.cart = {}
 if "recommended_product_ids" not in st.session_state:
@@ -708,9 +732,9 @@ if st.session_state.page == "Home":
             f"<style>{''.join(category_image_rules)}</style>",
             unsafe_allow_html=True,
         )
-    category_columns = st.columns(min(6, max(1, len(categories))))
-    for index, category in enumerate(categories):
-        with category_columns[index % len(category_columns)]:
+    category_columns = st.columns(6)
+    for index, category in enumerate(categories[:5]):
+        with category_columns[index]:
             with st.container(key=f"category-card-{index}"):
                 st.button(
                     category,
@@ -719,6 +743,41 @@ if st.session_state.page == "Home":
                     on_click=navigate_to_category,
                     args=(category,),
                 )
+    if len(categories) > 5:
+        with category_columns[5]:
+            with st.container(key="category-more"):
+                st.button(
+                    "",
+                    icon=(
+                        ":material/keyboard_arrow_up:"
+                        if st.session_state.show_all_categories
+                        else ":material/keyboard_arrow_down:"
+                    ),
+                    key="toggle_categories",
+                    help=(
+                        "See fewer categories"
+                        if st.session_state.show_all_categories
+                        else "See more categories"
+                    ),
+                    on_click=toggle_categories,
+                )
+    if st.session_state.show_all_categories:
+        extra_categories = categories[5:]
+        for row_start in range(0, len(extra_categories), 6):
+            extra_category_columns = st.columns(6)
+            for column_index, category in enumerate(
+                extra_categories[row_start : row_start + 6]
+            ):
+                category_index = row_start + column_index + 5
+                with extra_category_columns[column_index]:
+                    with st.container(key=f"category-card-{category_index}"):
+                        st.button(
+                            category,
+                            key=f"category_{category}",
+                            use_container_width=True,
+                            on_click=navigate_to_category,
+                            args=(category,),
+                        )
 
     filtered = df
     if search:
