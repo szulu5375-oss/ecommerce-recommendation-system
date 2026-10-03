@@ -1,11 +1,38 @@
-ProductID,Name,Category,Price,Description
-1,Wireless Mouse,Electronics,250,Ergonomic wireless mouse for office and gaming
-2,Gaming Keyboard,Electronics,650,RGB mechanical keyboard with fast response
-3,USB Headphones,Electronics,450,Noise cancelling wired headphones
-4,Running Shoes,Fashion,899,Comfortable lightweight sports shoes
-5,Leather Jacket,Fashion,1200,Stylish black leather jacket
-6,Blue Jeans,Fashion,550,Slim fit casual denim jeans
-7,Coffee Maker,Home,780,Automatic coffee brewing machine
-8,Blender,Home,620,High speed kitchen blender for smoothies
-9,Office Chair,Furniture,1450,Adjustable ergonomic office chair
-10,Study Desk,Furniture,1700,Wooden desk suitable for students
+ProductID,Name,Category,Price,Description,DiscountPercent
+1,Wireless Mouse,Electronics,250,Ergonomic wireless mouse for office and gaming,10
+2,Gaming Keyboard,Electronics,650,RGB mechanical keyboard with fast response,0
+3,USB Headphones,Electronics,450,Noise cancelling wired headphones,15
+4,Running Shoes,Fashion,899,Comfortable lightweight sports shoes,20
+5,Leather Jacket,Fashion,1200,Stylish black leather jacket,0
+6,Blue Jeans,Fashion,550,Slim fit casual denim jeans,0
+7,Coffee Maker,Home,780,Automatic coffee brewing machine,0
+8,Blender,Home,620,High speed kitchen blender for smoothies,0
+9,Office Chair,Furniture,1450,Adjustable ergonomic office chair,10
+10,Study Desk,Furniture,1700,Wooden desk suitable for students,0
+11,Floral Summer Dress,Women's Clothing,680,Lightweight floral dress for warm days,10
+12,Women's Denim Jacket,Women's Clothing,950,Classic denim jacket with a comfortable fit,0
+13,Women's Knit Sweater,Women's Clothing,720,Soft knit sweater for everyday wear,0
+14,Men's Polo Shirt,Men's Clothing,420,Classic cotton polo shirt for casual outfits,0
+15,Men's Chino Trousers,Men's Clothing,780,Slim fit chinos for work and weekends,0
+16,Men's Hoodie,Men's Clothing,650,Warm fleece hoodie with a front pocket,10
+17,Crossbody Handbag,Bags,590,Compact crossbody bag with adjustable strap,15
+18,Travel Backpack,Bags,850,Durable backpack with padded laptop compartment,0
+19,Classic Tote Bag,Bags,480,Everyday tote bag with roomy interior,20
+20,Classic Analog Watch,Watches,1100,Water resistant analog watch with leather strap,0
+21,Digital Sports Watch,Watches,790,Digital watch with stopwatch and alarm,0
+22,Smart Fitness Watch,Watches,1890,Smart watch with activity tracking and notifications,10
+23,Wireless Bluetooth Speaker,Tech Devices,950,Portable Bluetooth speaker with rich sound,0
+24,Smartphone,Tech Devices,7499,Smartphone with a large display and all day battery,8
+25,Lightweight Laptop,Tech Devices,12999,Portable laptop for study and everyday productivity,0
+26,Android Tablet,Tech Devices,4999,Compact tablet for reading streaming and browsing,0
+27,USB-C Fast Charger,Tech Devices,299,Fast charging USB-C adapter for compatible devices,0
+28,Trail Running Shoes,Footwear,1090,Supportive running shoes with grippy outsole,15
+29,Everyday Sneakers,Footwear,850,Comfortable low top sneakers for daily wear,0
+30,Leather Ankle Boots,Footwear,1390,Durable ankle boots with cushioned footbed,0
+31,Wireless Earbuds,Electronics,899,Compact wireless earbuds with charging case,0
+32,Webcam,Electronics,699,HD webcam for video calls and online classes,0
+33,Air Fryer,Home,1450,Countertop air fryer for quick everyday meals,12
+34,Electric Kettle,Home,399,Quick boiling kettle with automatic shutoff,0
+35,Bookshelf,Furniture,1190,Compact bookshelf with multiple storage shelves,0
+36,Floor Lamp,Furniture,890,Modern floor lamp for living rooms and bedrooms,0
+37,Casual T-Shirt,Fashion,299,Soft everyday t-shirt with a relaxed fit,0
