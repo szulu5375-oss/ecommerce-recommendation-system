@@ -436,17 +436,29 @@ similarity = cosine_similarity(feature_matrix)
 # RECOMMENDATION FUNCTION
 # (must be defined BEFORE the if/elif page chain)
 # -----------------------------
-def recommend(product_name, top_n=5):
-    index = df[df["Name"] == product_name].index[0]
+def recommend_for_cart(cart, top_n=5):
+    product_positions = {
+        str(product_id): position
+        for position, product_id in enumerate(df["ProductID"])
+    }
+    cart_items = [
+        (product_positions[product_id], quantity)
+        for product_id, quantity in cart.items()
+        if product_id in product_positions and quantity > 0
+    ]
+    if not cart_items:
+        return df.iloc[0:0]
 
-    scores = list(enumerate(similarity[index]))
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)
-
-    recommended = []
-    for i in scores[1:top_n + 1]:
-        recommended.append(df.iloc[i[0]])
-
-    return pd.DataFrame(recommended)
+    seed_positions = [position for position, _ in cart_items]
+    quantities = [quantity for _, quantity in cart_items]
+    scores = similarity[seed_positions].T.dot(quantities)
+    cart_positions = set(seed_positions)
+    ranked_positions = sorted(
+        (position for position in range(len(df)) if position not in cart_positions),
+        key=lambda position: scores[position],
+        reverse=True,
+    )
+    return df.iloc[ranked_positions[:top_n]]
 
 def product_icon(name, category):
     name = str(name).lower()
@@ -632,9 +644,6 @@ if "show_all_categories" not in st.session_state:
     st.session_state.show_all_categories = False
 if "cart" not in st.session_state:
     st.session_state.cart = {}
-if "recommended_product_ids" not in st.session_state:
-    st.session_state.recommended_product_ids = []
-
 pages = [
     "Home",
     "Products",
@@ -836,22 +845,18 @@ elif st.session_state.page == "Promotions":
     render_product_cards(discounted)
 
 elif st.session_state.page == "Recommendations":
-    st.header("Get Recommendations")
-    selected = st.selectbox("Choose a product", df["Name"])
-    if st.button("Recommend Similar Products"):
-        rec = recommend(selected)
-        st.session_state.recommended_product_ids = (
-            rec["ProductID"].astype(str).tolist()
-        )
-    if st.session_state.recommended_product_ids:
-        rec = (
-            df.assign(_product_id=df["ProductID"].astype(str))
-            .set_index("_product_id")
-            .loc[st.session_state.recommended_product_ids]
-            .reset_index(drop=True)
-        )
-        with st.container(key="recommendations-results"):
-            render_product_cards(rec)
+    st.header("Recommended for You")
+    cart = st.session_state.cart
+    if not cart:
+        st.info("Add products to your cart to see personalised recommendations.")
+    else:
+        rec = recommend_for_cart(cart)
+        if rec.empty:
+            st.info("No additional products to recommend right now.")
+        else:
+            st.caption("Based on the products in your cart")
+            with st.container(key="recommendations-results"):
+                render_product_cards(rec)
 
 elif st.session_state.page == "Cart":
     st.header("Your Cart")
