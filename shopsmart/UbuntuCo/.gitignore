@@ -1,0 +1,5 @@
+shopsmart.sqlite3
+shopsmart.sqlite3-shm
+shopsmart.sqlite3-wal
+.streamlit/secrets.toml
+__pycache__/

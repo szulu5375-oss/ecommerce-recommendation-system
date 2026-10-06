@@ -1,10 +1,21 @@
 
 import base64
+from contextlib import contextmanager
+import hashlib
+import hmac
+import json
 import os
+import secrets
+import sqlite3
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 
 import streamlit as st
 import pandas as pd
 from html import escape
+from streamlit.errors import StreamlitSecretNotFoundError
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -18,6 +29,380 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="expanded",
 )
+
+DATABASE_PATH = os.environ.get(
+    "SHOPSMART_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "shopsmart.sqlite3"),
+)
+PASSWORD_HASH_ITERATIONS = 310_000
+
+
+@contextmanager
+def get_database_connection():
+    database_directory = os.path.dirname(os.path.abspath(DATABASE_PATH))
+    os.makedirs(database_directory, exist_ok=True)
+    connection = sqlite3.connect(DATABASE_PATH, timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def initialize_database():
+    with get_database_connection() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                full_name TEXT NOT NULL,
+                password_salt BLOB NOT NULL,
+                password_hash BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS paypal_orders (
+                order_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                amount_cents INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                capture_id TEXT,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+
+
+def hash_password(password, salt):
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        PASSWORD_HASH_ITERATIONS,
+    )
+
+
+def create_user(full_name, email, password):
+    normalized_email = email.strip().casefold()
+    if not full_name.strip():
+        raise ValueError("Enter your name.")
+    if "@" not in normalized_email or any(char.isspace() for char in normalized_email):
+        raise ValueError("Enter a valid email address.")
+    if len(password) < 8:
+        raise ValueError("Use a password with at least 8 characters.")
+
+    salt = secrets.token_bytes(16)
+    password_hash = hash_password(password, salt)
+    with get_database_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO users (email, full_name, password_salt, password_hash, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_email,
+                full_name.strip(),
+                salt,
+                password_hash,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        return {
+            "id": cursor.lastrowid,
+            "full_name": full_name.strip(),
+            "email": normalized_email,
+        }
+
+
+def authenticate_user(email, password):
+    normalized_email = email.strip().casefold()
+    with get_database_connection() as connection:
+        user = connection.execute(
+            """
+            SELECT id, email, full_name, password_salt, password_hash
+            FROM users WHERE email = ?
+            """,
+            (normalized_email,),
+        ).fetchone()
+    if user is None or not hmac.compare_digest(
+        hash_password(password, user["password_salt"]),
+        user["password_hash"],
+    ):
+        return None
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "full_name": user["full_name"],
+    }
+
+
+def get_paypal_configuration():
+    try:
+        paypal_secrets = st.secrets["paypal"]
+    except (KeyError, StreamlitSecretNotFoundError):
+        paypal_secrets = {}
+
+    client_id = os.environ.get("PAYPAL_CLIENT_ID") or paypal_secrets.get("client_id", "")
+    client_secret = os.environ.get("PAYPAL_CLIENT_SECRET") or paypal_secrets.get(
+        "client_secret", ""
+    )
+    environment = (
+        os.environ.get("PAYPAL_ENVIRONMENT")
+        or paypal_secrets.get("environment", "sandbox")
+    ).lower()
+    return_url = os.environ.get("PAYPAL_RETURN_URL") or paypal_secrets.get(
+        "return_url", ""
+    )
+    cancel_url = os.environ.get("PAYPAL_CANCEL_URL") or paypal_secrets.get(
+        "cancel_url", ""
+    )
+    missing = [
+        setting
+        for setting, value in (
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("return_url", return_url),
+            ("cancel_url", cancel_url),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(
+            "PayPal Sandbox is not configured. Set "
+            + ", ".join(f"paypal.{setting}" for setting in missing)
+            + " in Streamlit secrets before accepting payments."
+        )
+    if environment not in {"sandbox", "live"}:
+        raise ValueError("PAYPAL_ENVIRONMENT must be either 'sandbox' or 'live'.")
+
+    return {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "api_base": (
+            "https://api-m.sandbox.paypal.com"
+            if environment == "sandbox"
+            else "https://api-m.paypal.com"
+        ),
+        "return_url": return_url,
+        "cancel_url": cancel_url,
+    }
+
+
+def paypal_api_request(method, path, payload=None):
+    configuration = get_paypal_configuration()
+    credentials = base64.b64encode(
+        f"{configuration['client_id']}:{configuration['client_secret']}".encode("utf-8")
+    ).decode("ascii")
+    token_request = urllib.request.Request(
+        f"{configuration['api_base']}/v1/oauth2/token",
+        data=b"grant_type=client_credentials",
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(token_request, timeout=20) as response:
+            access_token = json.loads(response.read())["access_token"]
+    except urllib.error.HTTPError as error:
+        details = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"PayPal authentication failed: {details}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Could not connect to PayPal: {error.reason}") from error
+    except (KeyError, json.JSONDecodeError) as error:
+        raise RuntimeError("PayPal returned an invalid authentication response.") from error
+
+    request_data = None
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if payload is not None:
+        request_data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    api_request = urllib.request.Request(
+        f"{configuration['api_base']}{path}",
+        data=request_data,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(api_request, timeout=20) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        details = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"PayPal request failed: {details}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Could not connect to PayPal: {error.reason}") from error
+    except json.JSONDecodeError as error:
+        raise RuntimeError("PayPal returned an invalid response.") from error
+
+
+def create_paypal_order(user_id, amount_cents):
+    configuration = get_paypal_configuration()
+    amount = f"{amount_cents / 100:.2f}"
+    order = paypal_api_request(
+        "POST",
+        "/v2/checkout/orders",
+        {
+            "intent": "CAPTURE",
+            "purchase_units": [
+                {
+                    "amount": {
+                        "currency_code": "ZAR",
+                        "value": amount,
+                    }
+                }
+            ],
+            "application_context": {
+                "return_url": configuration["return_url"],
+                "cancel_url": configuration["cancel_url"],
+                "user_action": "PAY_NOW",
+                "shipping_preference": "NO_SHIPPING",
+            },
+        },
+    )
+    order_id = order.get("id")
+    approval_url = next(
+        (
+            link["href"]
+            for link in order.get("links", [])
+            if link.get("rel") == "approve" and link.get("href")
+        ),
+        None,
+    )
+    if not order_id or not approval_url:
+        raise RuntimeError("PayPal did not return a valid order approval link.")
+
+    with get_database_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO paypal_orders (order_id, user_id, amount_cents, status, created_at)
+            VALUES (?, ?, ?, 'created', ?)
+            """,
+            (
+                order_id,
+                user_id,
+                amount_cents,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+    return order_id, approval_url
+
+
+def capture_paypal_order(order_id, user_id):
+    with get_database_connection() as connection:
+        order = connection.execute(
+            """
+            SELECT amount_cents, status FROM paypal_orders
+            WHERE order_id = ? AND user_id = ?
+            """,
+            (order_id, user_id),
+        ).fetchone()
+    if order is None:
+        raise ValueError("This PayPal order does not belong to your account.")
+    if order["status"] == "captured":
+        return
+    if order["status"] != "created":
+        raise ValueError("This PayPal order is no longer available for payment.")
+
+    result = paypal_api_request(
+        "POST",
+        f"/v2/checkout/orders/{urllib.parse.quote(order_id, safe='')}/capture",
+        {},
+    )
+    if result.get("status") != "COMPLETED":
+        raise RuntimeError("PayPal has not completed this payment.")
+    capture_id = (
+        result.get("purchase_units", [{}])[0]
+        .get("payments", {})
+        .get("captures", [{}])[0]
+        .get("id")
+    )
+    with get_database_connection() as connection:
+        connection.execute(
+            """
+            UPDATE paypal_orders
+            SET status = 'captured', capture_id = ?
+            WHERE order_id = ? AND user_id = ? AND status = 'created'
+            """,
+            (capture_id, order_id, user_id),
+        )
+
+
+def mark_paypal_order_cancelled(order_id, user_id):
+    if not order_id or not user_id:
+        return
+    with get_database_connection() as connection:
+        connection.execute(
+            """
+            UPDATE paypal_orders SET status = 'cancelled'
+            WHERE order_id = ? AND user_id = ? AND status = 'created'
+            """,
+            (order_id, user_id),
+        )
+
+
+def cart_total_cents(cart):
+    cart_products = df[df["ProductID"].astype(str).isin(cart)]
+    subtotal = sum(
+        discounted_price(
+            product["Price"],
+            float(product.get("DiscountPercent", 0) or 0),
+        )
+        * cart[str(product["ProductID"])]
+        for _, product in cart_products.iterrows()
+    )
+    delivery_fee = 75.0
+    return int(round((subtotal + delivery_fee) * 100))
+
+
+def process_paypal_return():
+    action = st.query_params.get("paypal")
+    if action == "cancelled":
+        user = st.session_state.authenticated_user
+        mark_paypal_order_cancelled(
+            st.query_params.get("token") or st.session_state.get("paypal_order_id"),
+            user["id"] if user else None,
+        )
+        st.session_state.paypal_order_id = None
+        st.session_state.paypal_approval_url = None
+        st.session_state.show_checkout_suggestions = False
+        st.session_state.paypal_notice = (
+            "info",
+            "PayPal checkout was cancelled. Your cart is unchanged.",
+        )
+        st.query_params.clear()
+        return
+
+    order_id = st.query_params.get("token")
+    if not order_id:
+        return
+    user = st.session_state.authenticated_user
+    if user is None:
+        st.session_state.paypal_notice = (
+            "error",
+            "Log in to the account used for this PayPal checkout to confirm payment.",
+        )
+        st.query_params.clear()
+        return
+    try:
+        capture_paypal_order(order_id, user["id"])
+    except (RuntimeError, ValueError) as error:
+        st.session_state.paypal_notice = ("error", str(error))
+    else:
+        st.session_state.cart = {}
+        st.session_state.page = "Home"
+        st.session_state.checkout_confirmed = False
+        st.session_state.paypal_notice = (
+            "success",
+            "Payment confirmed by PayPal. Your order is complete.",
+        )
+    st.session_state.paypal_order_id = None
+    st.session_state.paypal_approval_url = None
+    st.session_state.show_checkout_suggestions = False
+    st.query_params.clear()
+
 
 st.markdown(
     """
@@ -57,26 +442,30 @@ st.markdown(
         padding: 2.1rem 1.25rem 3rem;
     }
     .st-key-home-search {
-        width: calc(100% + 2rem);
-        margin-left: -1rem;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0.3rem;
+        border: 2px solid var(--peach);
+        border-radius: 0.9rem;
+        background: #fffaf7;
+        box-shadow: 0 3px 12px rgba(84, 26, 46, 0.1);
+    }
+    .st-key-home-search [data-testid="stTextInput"] {
+        width: 100%;
+    }
+    .st-key-home-search [data-testid="stTextInput"] > div {
+        width: 100%;
     }
     .st-key-home-search [data-testid="stTextInput"] input {
-        min-height: 5rem;
-        padding: 1rem 1.25rem;
-        border: 2px solid var(--peach);
-        border-radius: 0.85rem;
+        min-height: 3.25rem;
+        border: 1px solid var(--border);
+        border-radius: 0.75rem;
         background: #fff;
         color: var(--ink);
-        font-size: 1.15rem;
-        box-shadow: 0 4px 14px rgba(84, 26, 46, 0.12);
-    }
-    .st-key-home-search [data-testid="stTextInput"] input::placeholder {
-        color: #686371;
-        opacity: 1;
     }
     .st-key-home-search [data-testid="stTextInput"] input:focus {
-        border-color: var(--red);
-        box-shadow: 0 0 0 3px rgba(181, 26, 40, 0.17);
+        border-color: var(--wine);
+        box-shadow: 0 0 0 2px rgba(181, 26, 40, 0.14);
     }
     .shop-header {
         display: flex;
@@ -340,7 +729,6 @@ st.markdown(
     .st-key-sidebar-brand .shop-brand { font-size: 2.5rem; }
     @media (max-width: 640px) {
         div.block-container { padding: 0.65rem 0.8rem 2rem; }
-        .st-key-home-search { width: 100%; margin-left: 0; }
         .hero { min-height: 205px; padding: 1.2rem; }
         .hero-devices { font-size: 3.8rem; }
         .hero-copy { max-width: 65%; }
@@ -448,6 +836,27 @@ def recommend(product_name, top_n=5):
 
     return pd.DataFrame(recommended)
 
+
+def recommend_for_cart(cart):
+    cart_product_ids = set(cart)
+    cart_indices = [
+        index
+        for index, product_id in enumerate(df["ProductID"].astype(str))
+        if product_id in cart_product_ids
+    ]
+    if not cart_indices:
+        return df.iloc[0:0].copy()
+
+    scores = similarity[cart_indices, :].max(axis=0)
+    candidates = [
+        (index, float(score))
+        for index, score in enumerate(scores)
+        if str(df.iloc[index]["ProductID"]) not in cart_product_ids and score > 0
+    ]
+    candidates.sort(key=lambda candidate: (-candidate[1], candidate[0]))
+    return df.iloc[[index for index, _ in candidates]].copy()
+
+
 def product_icon(name, category):
     name = str(name).lower()
     category = str(category).lower()
@@ -490,7 +899,7 @@ def product_icon(name, category):
     return "📦"
 
 
-def render_product_cards(products):
+def render_product_cards(products, key_prefix="", show_cart_actions=True):
     if products.empty:
         st.info("No products found.")
         return
@@ -516,7 +925,7 @@ def render_product_cards(products):
             product_id = str(product["ProductID"])
             image_path = product_image_path(product_id)
             icon_markup = "" if image_path else f'<div class="product-icon">{icon}</div>'
-            with st.container(key=f"product-card-{product_id}"):
+            with st.container(key=f"product-card-{key_prefix}{product_id}"):
                 if image_path:
                     st.image(image_path, use_container_width=True)
                 card_html = (
@@ -529,40 +938,41 @@ def render_product_cards(products):
                     f'</div>'
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
-                quantity_in_cart = st.session_state.cart.get(product_id, 0)
-                if quantity_in_cart:
-                    minus_col, quantity_col, plus_col = st.columns([1, 1.2, 1])
-                    with minus_col:
+                if show_cart_actions:
+                    quantity_in_cart = st.session_state.cart.get(product_id, 0)
+                    if quantity_in_cart:
+                        minus_col, quantity_col, plus_col = st.columns([1, 1.2, 1])
+                        with minus_col:
+                            st.button(
+                                "−",
+                                key=f"{key_prefix}product_decrease_{product_id}",
+                                help=f"Remove one {name} from your cart",
+                                on_click=change_cart_quantity,
+                                args=(product_id, -1),
+                                use_container_width=True,
+                            )
+                        with quantity_col:
+                            st.markdown(
+                                f'<div class="cart-quantity">{quantity_in_cart}</div>',
+                                unsafe_allow_html=True,
+                            )
+                        with plus_col:
+                            st.button(
+                                "+",
+                                key=f"{key_prefix}product_increase_{product_id}",
+                                help=f"Add one more {name} to your cart",
+                                on_click=change_cart_quantity,
+                                args=(product_id, 1),
+                                use_container_width=True,
+                            )
+                    else:
                         st.button(
-                            "−",
-                            key=f"product_decrease_{product_id}",
-                            help=f"Remove one {name} from your cart",
-                            on_click=change_cart_quantity,
-                            args=(product_id, -1),
+                            "Add to Cart",
+                            key=f"{key_prefix}add_{product_id}",
                             use_container_width=True,
-                        )
-                    with quantity_col:
-                        st.markdown(
-                            f'<div class="cart-quantity">{quantity_in_cart}</div>',
-                            unsafe_allow_html=True,
-                        )
-                    with plus_col:
-                        st.button(
-                            "+",
-                            key=f"product_increase_{product_id}",
-                            help=f"Add one more {name} to your cart",
                             on_click=change_cart_quantity,
                             args=(product_id, 1),
-                            use_container_width=True,
                         )
-                else:
-                    st.button(
-                        "Add to Cart",
-                        key=f"add_{product_id}",
-                        use_container_width=True,
-                        on_click=change_cart_quantity,
-                        args=(product_id, 1),
-                    )
 
 
 def discounted_price(price, discount_percent):
@@ -612,6 +1022,7 @@ def change_cart_quantity(product_id, amount):
     else:
         cart.pop(product_id, None)
     st.session_state.cart = cart
+    st.session_state.checkout_confirmed = False
 
 
 def open_promotions():
@@ -622,8 +1033,62 @@ def open_popular_products():
     navigate_to_page("Popular Products")
 
 
+@st.dialog("Before you check out", width="large")
+def checkout_suggestions_dialog():
+    st.write("These similar products might go well with your cart.")
+    approval_url = st.session_state.paypal_approval_url
+    suggestions = recommend_for_cart(st.session_state.cart)
+    if suggestions.empty:
+        st.info("No similar products to recommend right now.")
+    else:
+        render_product_cards(
+            suggestions.head(4),
+            key_prefix="checkout-suggestion-",
+            show_cart_actions=not bool(approval_url),
+        )
+
+    if approval_url:
+        st.link_button(
+            "Open PayPal to pay",
+            approval_url,
+            use_container_width=True,
+        )
+        st.caption(
+            "Add or select your card securely on PayPal. ShopSmart does not "
+            "collect or store card numbers or security codes."
+        )
+    elif st.button(
+        "Continue to PayPal",
+        key="continue_to_paypal_button",
+        use_container_width=True,
+    ):
+        try:
+            order_id, approval_url = create_paypal_order(
+                st.session_state.authenticated_user["id"],
+                cart_total_cents(st.session_state.cart),
+            )
+        except (RuntimeError, ValueError) as error:
+            st.error(str(error))
+        else:
+            st.session_state.paypal_order_id = order_id
+            st.session_state.paypal_approval_url = approval_url
+            st.rerun()
+    if st.button("Keep shopping", key="keep_shopping_button"):
+        mark_paypal_order_cancelled(
+            st.session_state.paypal_order_id,
+            st.session_state.authenticated_user["id"],
+        )
+        st.session_state.show_checkout_suggestions = False
+        st.session_state.paypal_order_id = None
+        st.session_state.paypal_approval_url = None
+        st.rerun()
+
+
 if "page" not in st.session_state:
     st.session_state.page = "Home"
+initialize_database()
+if "authenticated_user" not in st.session_state:
+    st.session_state.authenticated_user = None
 if "category_filter" not in st.session_state:
     st.session_state.category_filter = ""
 elif st.session_state.category_filter not in CATEGORIES:
@@ -632,8 +1097,104 @@ if "show_all_categories" not in st.session_state:
     st.session_state.show_all_categories = False
 if "cart" not in st.session_state:
     st.session_state.cart = {}
+if "show_checkout_suggestions" not in st.session_state:
+    st.session_state.show_checkout_suggestions = False
+if "checkout_confirmed" not in st.session_state:
+    st.session_state.checkout_confirmed = False
+if "checkout_after_auth" not in st.session_state:
+    st.session_state.checkout_after_auth = False
+if "paypal_order_id" not in st.session_state:
+    st.session_state.paypal_order_id = None
+if "paypal_approval_url" not in st.session_state:
+    st.session_state.paypal_approval_url = None
 if "recommended_product_ids" not in st.session_state:
     st.session_state.recommended_product_ids = []
+
+if (
+    st.session_state.page == "Account"
+    and st.session_state.authenticated_user is None
+):
+    st.title("Create an account to check out" if st.session_state.checkout_after_auth else "Welcome to ShopSmart")
+    signup_tab, login_tab = st.tabs(["Sign up", "Log in"])
+
+    with signup_tab:
+        with st.form("signup_form"):
+            full_name = st.text_input("Full name", key="signup_full_name")
+            signup_email = st.text_input("Email", key="signup_email")
+            signup_password = st.text_input(
+                "Password",
+                type="password",
+                key="signup_password",
+                help="Use at least 8 characters.",
+            )
+            confirm_password = st.text_input(
+                "Confirm password",
+                type="password",
+                key="signup_confirm_password",
+            )
+            signup_submitted = st.form_submit_button(
+                "Create account",
+                use_container_width=True,
+            )
+        if signup_submitted:
+            if signup_password != confirm_password:
+                st.error("The passwords do not match.")
+            else:
+                try:
+                    st.session_state.authenticated_user = create_user(
+                        full_name,
+                        signup_email,
+                        signup_password,
+                    )
+                except ValueError as error:
+                    st.error(str(error))
+                except sqlite3.IntegrityError:
+                    st.error("An account with that email already exists.")
+                else:
+                    st.session_state.page = (
+                        "Cart" if st.session_state.checkout_after_auth else "Home"
+                    )
+                    if st.session_state.checkout_after_auth:
+                        st.session_state.checkout_after_auth = False
+                        st.session_state.show_checkout_suggestions = True
+                    st.rerun()
+
+    with login_tab:
+        with st.form("login_form"):
+            login_email = st.text_input("Email", key="login_email")
+            login_password = st.text_input(
+                "Password",
+                type="password",
+                key="login_password",
+            )
+            login_submitted = st.form_submit_button(
+                "Log in",
+                use_container_width=True,
+            )
+        if login_submitted:
+            user = authenticate_user(login_email, login_password)
+            if user is None:
+                st.error("Email or password is incorrect.")
+            else:
+                st.session_state.authenticated_user = user
+                st.session_state.page = (
+                    "Cart" if st.session_state.checkout_after_auth else "Home"
+                )
+                if st.session_state.checkout_after_auth:
+                    st.session_state.checkout_after_auth = False
+                    st.session_state.show_checkout_suggestions = True
+                st.rerun()
+
+    if st.button("Continue browsing as guest", key="continue_as_guest"):
+        st.session_state.page = "Home"
+        st.session_state.checkout_after_auth = False
+        st.rerun()
+elif st.session_state.page == "Account":
+    st.title("Your account")
+    st.write(f"Signed in as {st.session_state.authenticated_user['email']}.")
+
+if st.session_state.authenticated_user is not None:
+    process_paypal_return()
 
 pages = [
     "Home",
@@ -643,6 +1204,7 @@ pages = [
     "Recommendations",
     "Data Analysis",
     "Cart",
+    "Account",
 ]
 page_icons = {
     "Home": "home",
@@ -652,11 +1214,29 @@ page_icons = {
     "Recommendations": "auto_awesome",
     "Data Analysis": "analytics",
     "Cart": "shopping_cart",
+    "Account": "account_circle",
 }
 st.sidebar.markdown(
     '<div class="shop-brand">Shop<span>Smart</span></div>',
     unsafe_allow_html=True,
 )
+if st.session_state.authenticated_user is None:
+    st.sidebar.caption("Browsing as guest")
+else:
+    st.sidebar.caption(f"Signed in as {st.session_state.authenticated_user['full_name']}")
+    if st.sidebar.button("Log out", key="logout_button", use_container_width=True):
+        mark_paypal_order_cancelled(
+            st.session_state.paypal_order_id,
+            st.session_state.authenticated_user["id"],
+        )
+        st.session_state.authenticated_user = None
+        st.session_state.page = "Home"
+        st.session_state.paypal_order_id = None
+        st.session_state.paypal_approval_url = None
+        st.session_state.show_checkout_suggestions = False
+        st.session_state.checkout_confirmed = False
+        st.session_state.checkout_after_auth = False
+        st.rerun()
 st.sidebar.markdown(
     '<div style="padding:0.9rem 0 0.4rem;color:#ffa586;font-size:0.72rem;'
     'font-weight:700;letter-spacing:0.12em">NAVIGATION</div>',
@@ -674,13 +1254,14 @@ for page in pages:
             use_container_width=True,
         )
 
+if "paypal_notice" in st.session_state:
+    notice_type, notice_message = st.session_state.pop("paypal_notice")
+    getattr(st, notice_type)(notice_message)
+
 if st.session_state.page == "Home":
+    st.markdown("**Search product**")
     with st.container(key="home-search"):
-        search = st.text_input(
-            "Search products",
-            placeholder="⌕  Search for products, brands and more...",
-            label_visibility="collapsed",
-        )
+        search = st.text_input("Search product", label_visibility="collapsed")
     banner_image = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "Images", "Banner.jpeg")
     )
@@ -903,11 +1484,28 @@ elif st.session_state.page == "Cart":
         st.markdown(f"**Subtotal: R {total:,.2f}**")
         st.markdown(f"**Delivery: R {delivery_fee:,.2f}**")
         st.subheader(f"Total: R {total + delivery_fee:,.2f}")
-        if st.button("Checkout", key="checkout_button", use_container_width=True):
+        st.divider()
+        similar_products = recommend_for_cart(cart)
+        st.markdown(
+            '<div class="section-title">Similar products for your cart</div>',
+            unsafe_allow_html=True,
+        )
+        render_product_cards(
+            similar_products,
+            key_prefix="cart-similar-",
+        )
+        if st.session_state.checkout_confirmed:
             st.success(
                 f"Checkout confirmed. Your total, including delivery, is "
                 f"R {total + delivery_fee:,.2f}. Your cart has been kept."
             )
+        elif st.button("Checkout", key="checkout_button", use_container_width=True):
+            if st.session_state.authenticated_user is None:
+                st.session_state.checkout_after_auth = True
+                st.session_state.page = "Account"
+            else:
+                st.session_state.show_checkout_suggestions = True
+            st.rerun()
 
 elif st.session_state.page == "Data Analysis":
     st.header("Dataset Overview")
@@ -953,6 +1551,7 @@ elif st.session_state.page == "Data Analysis":
             },
             use_container_width=True,
         )
+
     with pie_chart:
         st.vega_lite_chart(
             category_counts,
@@ -969,6 +1568,7 @@ elif st.session_state.page == "Data Analysis":
             },
             use_container_width=True,
         )
+
     st.subheader("Category Counts Across Categories")
     st.vega_lite_chart(
         category_counts,
@@ -994,3 +1594,22 @@ elif st.session_state.page == "Data Analysis":
         },
         use_container_width=True,
     )
+
+if st.session_state.cart and st.session_state.page in {
+    "Home",
+    "Products",
+    "Promotions",
+    "Popular Products",
+    "Recommendations",
+}:
+    st.markdown(
+        '<div class="section-title">Similar products for your cart</div>',
+        unsafe_allow_html=True,
+    )
+    render_product_cards(
+        recommend_for_cart(st.session_state.cart),
+        key_prefix="shopping-similar-",
+    )
+
+if st.session_state.show_checkout_suggestions:
+    checkout_suggestions_dialog()
