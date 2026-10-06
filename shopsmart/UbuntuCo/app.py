@@ -824,36 +824,31 @@ similarity = cosine_similarity(feature_matrix)
 # RECOMMENDATION FUNCTION
 # (must be defined BEFORE the if/elif page chain)
 # -----------------------------
-def recommend(product_name, top_n=5):
-    index = df[df["Name"] == product_name].index[0]
-
-    scores = list(enumerate(similarity[index]))
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)
-
-    recommended = []
-    for i in scores[1:top_n + 1]:
-        recommended.append(df.iloc[i[0]])
-
-    return pd.DataFrame(recommended)
-
-
-def recommend_for_cart(cart):
-    cart_product_ids = set(cart)
-    cart_indices = [
-        index
-        for index, product_id in enumerate(df["ProductID"].astype(str))
-        if product_id in cart_product_ids
+def recommend_for_cart(cart, top_n=None):
+    product_positions = {
+        str(product_id): position
+        for position, product_id in enumerate(df["ProductID"])
+    }
+    cart_items = [
+        (product_positions[product_id], quantity)
+        for product_id, quantity in cart.items()
+        if product_id in product_positions and quantity > 0
     ]
-    if not cart_indices:
+    if not cart_items:
         return df.iloc[0:0].copy()
 
-    scores = similarity[cart_indices, :].max(axis=0)
+    cart_positions = {position for position, _ in cart_items}
+    seed_positions = [position for position, _ in cart_items]
+    quantities = [quantity for _, quantity in cart_items]
+    scores = similarity[seed_positions].T.dot(quantities)
     candidates = [
         (index, float(score))
         for index, score in enumerate(scores)
-        if str(df.iloc[index]["ProductID"]) not in cart_product_ids and score > 0
+        if index not in cart_positions and score > 0
     ]
     candidates.sort(key=lambda candidate: (-candidate[1], candidate[0]))
+    if top_n is not None:
+        candidates = candidates[:top_n]
     return df.iloc[[index for index, _ in candidates]].copy()
 
 
@@ -1107,9 +1102,6 @@ if "paypal_order_id" not in st.session_state:
     st.session_state.paypal_order_id = None
 if "paypal_approval_url" not in st.session_state:
     st.session_state.paypal_approval_url = None
-if "recommended_product_ids" not in st.session_state:
-    st.session_state.recommended_product_ids = []
-
 if (
     st.session_state.page == "Account"
     and st.session_state.authenticated_user is None
@@ -1417,22 +1409,17 @@ elif st.session_state.page == "Promotions":
     render_product_cards(discounted)
 
 elif st.session_state.page == "Recommendations":
-    st.header("Get Recommendations")
-    selected = st.selectbox("Choose a product", df["Name"])
-    if st.button("Recommend Similar Products"):
-        rec = recommend(selected)
-        st.session_state.recommended_product_ids = (
-            rec["ProductID"].astype(str).tolist()
-        )
-    if st.session_state.recommended_product_ids:
-        rec = (
-            df.assign(_product_id=df["ProductID"].astype(str))
-            .set_index("_product_id")
-            .loc[st.session_state.recommended_product_ids]
-            .reset_index(drop=True)
-        )
-        with st.container(key="recommendations-results"):
-            render_product_cards(rec)
+    st.header("Recommended for You")
+    if not st.session_state.cart:
+        st.info("Add products to your cart to see personalised recommendations.")
+    else:
+        rec = recommend_for_cart(st.session_state.cart, top_n=5)
+        if rec.empty:
+            st.info("No additional products to recommend right now.")
+        else:
+            st.caption("Based on the products in your cart")
+            with st.container(key="recommendations-results"):
+                render_product_cards(rec)
 
 elif st.session_state.page == "Cart":
     st.header("Your Cart")
