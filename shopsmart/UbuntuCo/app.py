@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import sqlite3
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -139,15 +140,27 @@ def authenticate_user(email, password):
 
 
 def get_paypal_configuration():
-    try:
-        paypal_secrets = st.secrets["paypal"]
-    except (KeyError, StreamlitSecretNotFoundError):
-        paypal_secrets = {}
-
-    client_id = os.environ.get("PAYPAL_CLIENT_ID") or paypal_secrets.get("client_id", "")
-    client_secret = os.environ.get("PAYPAL_CLIENT_SECRET") or paypal_secrets.get(
-        "client_secret", ""
+    secrets_path = os.path.join(
+        os.path.dirname(__file__),
+        ".streamlit",
+        "secrets.toml",
     )
+    if os.path.isfile(secrets_path):
+        with open(secrets_path, "rb") as secrets_file:
+            paypal_secrets = tomllib.load(secrets_file).get("paypal", {})
+    else:
+        try:
+            paypal_secrets = st.secrets["paypal"]
+        except (KeyError, StreamlitSecretNotFoundError):
+            paypal_secrets = {}
+
+    client_id = (
+        os.environ.get("PAYPAL_CLIENT_ID") or paypal_secrets.get("client_id", "")
+    ).strip()
+    client_secret = (
+        os.environ.get("PAYPAL_CLIENT_SECRET")
+        or paypal_secrets.get("client_secret", "")
+    ).strip()
     environment = (
         os.environ.get("PAYPAL_ENVIRONMENT")
         or paypal_secrets.get("environment", "sandbox")
@@ -173,6 +186,14 @@ def get_paypal_configuration():
             "PayPal Sandbox is not configured. Set "
             + ", ".join(f"paypal.{setting}" for setting in missing)
             + " in Streamlit secrets before accepting payments."
+        )
+    if client_id.startswith("YOUR_PAYPAL_") or client_secret.startswith(
+        "YOUR_PAYPAL_"
+    ):
+        raise ValueError(
+            "Replace the PayPal credential placeholders in "
+            ".streamlit/secrets.toml with the Client ID and Secret from the "
+            "same PayPal Sandbox REST app."
         )
     if environment not in {"sandbox", "live"}:
         raise ValueError("PAYPAL_ENVIRONMENT must be either 'sandbox' or 'live'.")
@@ -852,6 +873,30 @@ def recommend_for_cart(cart, top_n=None):
     return df.iloc[[index for index, _ in candidates]].copy()
 
 
+def recommend_for_products(products, top_n=8):
+    product_positions = {
+        str(product_id): position
+        for position, product_id in enumerate(df["ProductID"])
+    }
+    source_positions = [
+        product_positions[str(product_id)]
+        for product_id in products["ProductID"]
+        if str(product_id) in product_positions
+    ]
+    if not source_positions:
+        return df.iloc[0:0].copy()
+
+    scores = similarity[source_positions, :].max(axis=0)
+    source_position_set = set(source_positions)
+    candidates = [
+        (index, float(score))
+        for index, score in enumerate(scores)
+        if index not in source_position_set and score > 0
+    ]
+    candidates.sort(key=lambda candidate: (-candidate[1], candidate[0]))
+    return df.iloc[[index for index, _ in candidates[:top_n]]].copy()
+
+
 def product_icon(name, category):
     name = str(name).lower()
     category = str(category).lower()
@@ -1081,6 +1126,8 @@ def checkout_suggestions_dialog():
 
 if "page" not in st.session_state:
     st.session_state.page = "Home"
+if "last_rendered_page" not in st.session_state:
+    st.session_state.last_rendered_page = st.session_state.page
 initialize_database()
 if "authenticated_user" not in st.session_state:
     st.session_state.authenticated_user = None
@@ -1250,10 +1297,65 @@ if "paypal_notice" in st.session_state:
     notice_type, notice_message = st.session_state.pop("paypal_notice")
     getattr(st, notice_type)(notice_message)
 
+if st.session_state.page != st.session_state.last_rendered_page:
+    st.html(
+        """
+        <script>
+        const scrollPageToTop = () => {
+            window.scrollTo({top: 0, left: 0, behavior: "instant"});
+            const appView = document.querySelector(
+                '[data-testid="stAppViewContainer"]'
+            );
+            if (appView) {
+                appView.scrollTo({top: 0, left: 0, behavior: "instant"});
+            }
+        };
+        scrollPageToTop();
+        window.setTimeout(scrollPageToTop, 100);
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+    st.session_state.last_rendered_page = st.session_state.page
+
 if st.session_state.page == "Home":
     st.markdown("**Search product**")
     with st.container(key="home-search"):
-        search = st.text_input("Search product", label_visibility="collapsed")
+        search = st.text_input(
+            "Search product",
+            label_visibility="collapsed",
+            key="home_search_input",
+        )
+    if search.strip():
+        search_results = df[
+            df["Name"].str.contains(search.strip(), case=False, regex=False)
+        ].reset_index(drop=True)
+        st.markdown(
+            f'<div class="section-title">Search results ({len(search_results)})</div>',
+            unsafe_allow_html=True,
+        )
+        if search_results.empty:
+            st.info("No matching products found.")
+        else:
+            render_product_cards(
+                search_results,
+                key_prefix="home-search-result-",
+            )
+
+        related_products = recommend_for_products(search_results)
+        st.markdown(
+            '<div class="section-title">Related products</div>',
+            unsafe_allow_html=True,
+        )
+        if related_products.empty:
+            st.info("No related products found.")
+        else:
+            render_product_cards(
+                related_products,
+                key_prefix="home-search-related-",
+            )
+        st.stop()
+
     banner_image = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "Images", "Banner.jpeg")
     )
