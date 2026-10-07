@@ -1,4 +1,3 @@
-
 import base64
 from contextlib import contextmanager
 import hashlib
@@ -12,6 +11,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
+import numpy as np
 import streamlit as st
 import pandas as pd
 from html import escape
@@ -19,11 +19,6 @@ from streamlit.errors import StreamlitSecretNotFoundError
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-
-import uuid
-import interaction_log
-from recommender_service import RecommenderService
-from stats_page import render_stats
 
 # -----------------------------
 # PAGE SETTINGS
@@ -364,10 +359,13 @@ def cart_total_cents(cart):
 
 def process_paypal_return():
     action = st.query_params.get("paypal")
+    order_id = st.query_params.get("token")
+    user = st.session_state.authenticated_user
+
+    # Customer cancelled on PayPal
     if action == "cancelled":
-        user = st.session_state.authenticated_user
         mark_paypal_order_cancelled(
-            st.query_params.get("token") or st.session_state.get("paypal_order_id"),
+            order_id or st.session_state.get("paypal_order_id"),
             user["id"] if user else None,
         )
         st.session_state.paypal_order_id = None
@@ -380,10 +378,11 @@ def process_paypal_return():
         st.query_params.clear()
         return
 
-    order_id = st.query_params.get("token")
+    # Not a PayPal return at all
     if not order_id:
         return
-    user = st.session_state.authenticated_user
+
+    # Customer approved payment on PayPal
     if user is None:
         st.session_state.paypal_notice = (
             "error",
@@ -396,7 +395,6 @@ def process_paypal_return():
     except (RuntimeError, ValueError) as error:
         st.session_state.paypal_notice = ("error", str(error))
     else:
-        interaction_log.log_purchases_for_order(DATABASE_PATH, order_id, f"u_{user['id']}")
         st.session_state.cart = {}
         st.session_state.page = "Home"
         st.session_state.checkout_confirmed = False
@@ -409,6 +407,29 @@ def process_paypal_return():
     st.session_state.show_checkout_suggestions = False
     st.query_params.clear()
 
+
+# -----------------------------
+# LOAD DATA & RECOMMENDATIONS
+# -----------------------------
+@st.cache_data
+def load_all_data():
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+    # Load Main Products Data
+    products_path = os.path.join(BASE_DIR, "products.csv")
+    df_products = pd.read_csv(products_path)
+
+    # Load Precomputed Hybrid Recommendations from Colab
+    recs_path = os.path.join(BASE_DIR, "Customer_Recommendations.csv")
+    if os.path.exists(recs_path):
+        df_recs = pd.read_csv(recs_path)
+    else:
+        df_recs = pd.DataFrame()
+
+    return df_products, df_recs
+
+
+df, df_customer_recs = load_all_data()
 
 st.markdown(
     """
@@ -843,33 +864,24 @@ def recommend(product_name, top_n=5):
     return pd.DataFrame(recommended)
 
 
-def current_actor():
-    """Who is shopping: 'u_<id>' when logged in, otherwise 'g_<session>' (guest)."""
-    user = st.session_state.authenticated_user
-    return f"u_{user['id']}" if user else f"g_{st.session_state.session_id}"
-
-
-@st.cache_resource(show_spinner=False, max_entries=2)
-def _build_recommender(bucket):
-    events = interaction_log.load_events(DATABASE_PATH)
-    return RecommenderService(extra_ratings=interaction_log.to_ratings(events))
-
-
-def get_recommender():
-    # retrains automatically after every 5 new customer actions
-    return _build_recommender(interaction_log.count_events(DATABASE_PATH) // 5)
-
-
-def personal_recommendations(n=4):
-    recs = get_recommender().for_user(current_actor(), n)
-    return recs.drop(columns=["match"]).reset_index(drop=True)
-
-
 def recommend_for_cart(cart):
-    if not cart:
+    cart_product_ids = set(cart)
+    cart_indices = [
+        index
+        for index, product_id in enumerate(df["ProductID"].astype(str))
+        if product_id in cart_product_ids
+    ]
+    if not cart_indices:
         return df.iloc[0:0].copy()
-    recs = get_recommender().for_cart([int(p) for p in cart], n=8)
-    return recs.drop(columns=["match"]).reset_index(drop=True)
+
+    scores = similarity[cart_indices, :].max(axis=0)
+    candidates = [
+        (index, float(score))
+        for index, score in enumerate(scores)
+        if str(df.iloc[index]["ProductID"]) not in cart_product_ids and score > 0
+    ]
+    candidates.sort(key=lambda candidate: (-candidate[1], candidate[0]))
+    return df.iloc[[index for index, _ in candidates]].copy()
 
 
 def product_icon(name, category):
@@ -1038,8 +1050,6 @@ def change_cart_quantity(product_id, amount):
         cart.pop(product_id, None)
     st.session_state.cart = cart
     st.session_state.checkout_confirmed = False
-    if amount > 0:
-        interaction_log.log_event(DATABASE_PATH, current_actor(), int(product_id), "cart_add")
 
 
 def open_promotions():
@@ -1087,7 +1097,6 @@ def checkout_suggestions_dialog():
         except (RuntimeError, ValueError) as error:
             st.error(str(error))
         else:
-            interaction_log.save_order_items(DATABASE_PATH, order_id, st.session_state.cart)
             st.session_state.paypal_order_id = order_id
             st.session_state.paypal_approval_url = approval_url
             st.rerun()
@@ -1102,12 +1111,12 @@ def checkout_suggestions_dialog():
         st.rerun()
 
 
+# -----------------------------
+# SESSION STATE
+# -----------------------------
 if "page" not in st.session_state:
     st.session_state.page = "Home"
 initialize_database()
-interaction_log.init(DATABASE_PATH)
-if "session_id" not in st.session_state:
-    st.session_state.session_id = uuid.uuid4().hex[:12]
 if "authenticated_user" not in st.session_state:
     st.session_state.authenticated_user = None
 if "category_filter" not in st.session_state:
@@ -1130,6 +1139,9 @@ if "paypal_approval_url" not in st.session_state:
     st.session_state.paypal_approval_url = None
 if "recommended_product_ids" not in st.session_state:
     st.session_state.recommended_product_ids = []
+
+# Handle a return from PayPal (runs for guests too, so they see a message)
+process_paypal_return()
 
 if (
     st.session_state.page == "Account"
@@ -1213,9 +1225,6 @@ if (
 elif st.session_state.page == "Account":
     st.title("Your account")
     st.write(f"Signed in as {st.session_state.authenticated_user['email']}.")
-
-if st.session_state.authenticated_user is not None:
-    process_paypal_return()
 
 pages = [
     "Home",
@@ -1438,28 +1447,69 @@ elif st.session_state.page == "Promotions":
     render_product_cards(discounted)
 
 elif st.session_state.page == "Recommendations":
-    st.header("Get Recommendations")
-    selected = st.selectbox("Choose a product", df["Name"])
-    if st.button("Recommend Similar Products"):
-        interaction_log.log_event(
-            DATABASE_PATH, current_actor(),
-            int(df.loc[df["Name"] == selected, "ProductID"].iloc[0]), "view",
-        )
-        rec = recommend(selected)
-        st.session_state.recommended_product_ids = (
-            rec["ProductID"].astype(str).tolist()
-        )
-    if st.session_state.recommended_product_ids:
-        rec = (
-            df.assign(_product_id=df["ProductID"].astype(str))
-            .set_index("_product_id")
-            .loc[st.session_state.recommended_product_ids]
-            .reset_index(drop=True)
-        )
-        with st.container(key="recommendations-results"):
-            render_product_cards(rec)
-    st.markdown('<div class="section-title">Picked for you</div>', unsafe_allow_html=True)
-    render_product_cards(personal_recommendations(), key_prefix="for-you-")
+    st.header("🎯 AI Recommendation Engine")
+
+    tab1, tab2 = st.tabs(["👤 Customer Recommendations", "📦 Product-Based Recommendations"])
+
+    # TAB 1: User-Based Hybrid Recommendations from Colab
+    with tab1:
+        st.subheader("Personalized Customer Recommendations")
+        if df_customer_recs.empty:
+            st.warning("Customer recommendations dataset ('Customer_Recommendations.csv') not found in project folder.")
+        else:
+            customer_ids = df_customer_recs["CustomerID"].astype(str).unique()
+
+            # Default selection to signed-in user if available
+            default_index = 0
+            if st.session_state.get("authenticated_user"):
+                user_id_str = str(st.session_state.authenticated_user.get("id"))
+                if user_id_str in customer_ids:
+                    default_index = int(np.where(customer_ids == user_id_str)[0][0])
+
+            selected_cust_id = st.selectbox(
+                "Select or Enter Customer ID:",
+                options=customer_ids,
+                index=default_index,
+                key="rec_customer_select"
+            )
+
+            cust_rec_row = df_customer_recs[df_customer_recs["CustomerID"].astype(str) == selected_cust_id]
+
+            if not cust_rec_row.empty:
+                row = cust_rec_row.iloc[0]
+                st.markdown(f"### Top Recommended Categories for Customer `{selected_cust_id}`")
+
+                rec_cols = st.columns(3)
+                for rank in range(1, 4):
+                    prod_col = f"Rec_{rank}_Product"
+                    code_col = f"Rec_{rank}_StockCode"
+                    score_col = f"Rec_{rank}_Score"
+
+                    if prod_col in row:
+                        with rec_cols[rank - 1]:
+                            st.markdown(f"#### 🏆 Rank {rank}")
+                            st.metric(label="Category / Product", value=str(row[prod_col]))
+                            st.write(f"**StockCode:** `{row.get(code_col, 'N/A')}`")
+                            if score_col in row:
+                                st.write(f"**Match Score:** `{float(row[score_col]):.4f}`")
+
+    # TAB 2: Item-Based Content Recommendations
+    with tab2:
+        st.subheader("Find Similar Products")
+        selected_prod = st.selectbox("Choose a product", df["Name"], key="rec_product_select")
+        if st.button("Recommend Similar Products", key="btn_rec_product"):
+            rec = recommend(selected_prod)
+            st.session_state.recommended_product_ids = rec["ProductID"].astype(str).tolist()
+
+        if st.session_state.get("recommended_product_ids"):
+            rec_df = (
+                df.assign(_product_id=df["ProductID"].astype(str))
+                .set_index("_product_id")
+                .loc[st.session_state.recommended_product_ids]
+                .reset_index(drop=True)
+            )
+            with st.container(key="recommendations-results"):
+                render_product_cards(rec_df)
 
 elif st.session_state.page == "Cart":
     st.header("Your Cart")
@@ -1535,8 +1585,92 @@ elif st.session_state.page == "Cart":
             st.rerun()
 
 elif st.session_state.page == "Data Analysis":
-    st.header("Store & Recommender Statistics")
-    render_stats(df, DATABASE_PATH, get_recommender())
+    st.header("Dataset Overview")
+    st.dataframe(with_rand_prices(df), use_container_width=True)
+    st.subheader("Products per Category")
+    category_counts = (
+        df["Category"].value_counts().rename_axis("Category")
+        .reset_index(name="Products")
+    )
+    color_encoding = {
+        "field": "Category",
+        "type": "nominal",
+        "scale": {
+            "domain": CATEGORIES,
+            "range": [CATEGORY_COLORS[category] for category in CATEGORIES],
+        },
+        "legend": {"title": "Category"},
+    }
+    bar_chart, pie_chart = st.columns(2)
+    with bar_chart:
+        st.vega_lite_chart(
+            category_counts,
+            {
+                "mark": "bar",
+                "encoding": {
+                    "x": {
+                        "field": "Category",
+                        "type": "nominal",
+                        "sort": CATEGORIES,
+                        "axis": {"title": "Category", "labelAngle": -45},
+                    },
+                    "y": {
+                        "field": "Products",
+                        "type": "quantitative",
+                        "axis": {"title": "Number of products"},
+                    },
+                    "color": color_encoding,
+                    "tooltip": [
+                        {"field": "Category", "type": "nominal"},
+                        {"field": "Products", "type": "quantitative"},
+                    ],
+                },
+            },
+            use_container_width=True,
+        )
+
+    with pie_chart:
+        st.vega_lite_chart(
+            category_counts,
+            {
+                "mark": {"type": "arc", "outerRadius": 115},
+                "encoding": {
+                    "theta": {"field": "Products", "type": "quantitative"},
+                    "color": color_encoding,
+                    "tooltip": [
+                        {"field": "Category", "type": "nominal"},
+                        {"field": "Products", "type": "quantitative"},
+                    ],
+                },
+            },
+            use_container_width=True,
+        )
+
+    st.subheader("Category Counts Across Categories")
+    st.vega_lite_chart(
+        category_counts,
+        {
+            "mark": {"type": "line", "point": True, "color": "#541a2e"},
+            "encoding": {
+                "x": {
+                    "field": "Category",
+                    "type": "nominal",
+                    "sort": CATEGORIES,
+                    "axis": {"title": "Category", "labelAngle": -45},
+                },
+                "y": {
+                    "field": "Products",
+                    "type": "quantitative",
+                    "axis": {"title": "Number of products"},
+                },
+                "tooltip": [
+                    {"field": "Category", "type": "nominal"},
+                    {"field": "Products", "type": "quantitative"},
+                ],
+            },
+        },
+        use_container_width=True,
+    )
 
 if st.session_state.cart and st.session_state.page in {
     "Home",
