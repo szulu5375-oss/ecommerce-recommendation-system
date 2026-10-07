@@ -396,6 +396,10 @@ def load_all_data():
 
 df, df_customer_recs = load_all_data()
 
+df, df_customer_recs = load_all_data()
+
+
+def process_paypal_return():
     order_id = st.query_params.get("token")
     if not order_id:
         return
@@ -425,7 +429,9 @@ df, df_customer_recs = load_all_data()
     st.query_params.clear()
 
 
-st.markdown(
+process_paypal_return()
+    
+    
     """
     <style>
     :root {
