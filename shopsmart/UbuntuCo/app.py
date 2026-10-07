@@ -20,6 +20,11 @@ from streamlit.errors import StreamlitSecretNotFoundError
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+import uuid
+import interaction_log
+from recommender_service import RecommenderService
+from stats_page import render_stats
+
 # -----------------------------
 # PAGE SETTINGS
 # -----------------------------
@@ -395,6 +400,7 @@ def process_paypal_return():
     except (RuntimeError, ValueError) as error:
         st.session_state.paypal_notice = ("error", str(error))
     else:
+        interaction_log.log_purchases_for_order(DATABASE_PATH, order_id, f"u_{user['id']}")
         st.session_state.cart = {}
         st.session_state.page = "Home"
         st.session_state.checkout_confirmed = False
@@ -864,24 +870,33 @@ def recommend(product_name, top_n=5):
     return pd.DataFrame(recommended)
 
 
-def recommend_for_cart(cart):
-    cart_product_ids = set(cart)
-    cart_indices = [
-        index
-        for index, product_id in enumerate(df["ProductID"].astype(str))
-        if product_id in cart_product_ids
-    ]
-    if not cart_indices:
-        return df.iloc[0:0].copy()
+def current_actor():
+    """Who is shopping: 'u_<id>' when logged in, otherwise 'g_<session>' (guest)."""
+    user = st.session_state.get("authenticated_user")
+    return f"u_{user['id']}" if user else f"g_{st.session_state.session_id}"
 
-    scores = similarity[cart_indices, :].max(axis=0)
-    candidates = [
-        (index, float(score))
-        for index, score in enumerate(scores)
-        if str(df.iloc[index]["ProductID"]) not in cart_product_ids and score > 0
-    ]
-    candidates.sort(key=lambda candidate: (-candidate[1], candidate[0]))
-    return df.iloc[[index for index, _ in candidates]].copy()
+
+@st.cache_resource(show_spinner=False, max_entries=2)
+def _build_recommender(bucket):
+    events = interaction_log.load_events(DATABASE_PATH)
+    return RecommenderService(extra_ratings=interaction_log.to_ratings(events))
+
+
+def get_recommender():
+    # retrains automatically after every 5 new customer actions
+    return _build_recommender(interaction_log.count_events(DATABASE_PATH) // 5)
+
+
+def personal_recommendations(n=4):
+    recs = get_recommender().for_user(current_actor(), n)
+    return recs.drop(columns=["match"]).reset_index(drop=True)
+
+
+def recommend_for_cart(cart):
+    if not cart:
+        return df.iloc[0:0].copy()
+    recs = get_recommender().for_cart([int(p) for p in cart], n=8)
+    return recs.drop(columns=["match"]).reset_index(drop=True)
 
 
 def product_icon(name, category):
@@ -954,7 +969,7 @@ def render_product_cards(products, key_prefix="", show_cart_actions=True):
             icon_markup = "" if image_path else f'<div class="product-icon">{icon}</div>'
             with st.container(key=f"product-card-{key_prefix}{product_id}"):
                 if image_path:
-                    st.image(image_path, use_container_width=True)
+                    st.image(image_path, width="stretch")
                 card_html = (
                     f'<div class="product-card">'
                     f'{icon_markup}'
@@ -976,7 +991,7 @@ def render_product_cards(products, key_prefix="", show_cart_actions=True):
                                 help=f"Remove one {name} from your cart",
                                 on_click=change_cart_quantity,
                                 args=(product_id, -1),
-                                use_container_width=True,
+                                width="stretch",
                             )
                         with quantity_col:
                             st.markdown(
@@ -990,13 +1005,13 @@ def render_product_cards(products, key_prefix="", show_cart_actions=True):
                                 help=f"Add one more {name} to your cart",
                                 on_click=change_cart_quantity,
                                 args=(product_id, 1),
-                                use_container_width=True,
+                                width="stretch",
                             )
                     else:
                         st.button(
                             "Add to Cart",
                             key=f"{key_prefix}add_{product_id}",
-                            use_container_width=True,
+                            width="stretch",
                             on_click=change_cart_quantity,
                             args=(product_id, 1),
                         )
@@ -1050,6 +1065,8 @@ def change_cart_quantity(product_id, amount):
         cart.pop(product_id, None)
     st.session_state.cart = cart
     st.session_state.checkout_confirmed = False
+    if amount > 0:
+        interaction_log.log_event(DATABASE_PATH, current_actor(), int(product_id), "cart_add")
 
 
 def open_promotions():
@@ -1078,7 +1095,7 @@ def checkout_suggestions_dialog():
         st.link_button(
             "Open PayPal to pay",
             approval_url,
-            use_container_width=True,
+            width="stretch",
         )
         st.caption(
             "Add or select your card securely on PayPal. ShopSmart does not "
@@ -1087,7 +1104,7 @@ def checkout_suggestions_dialog():
     elif st.button(
         "Continue to PayPal",
         key="continue_to_paypal_button",
-        use_container_width=True,
+        width="stretch",
     ):
         try:
             order_id, approval_url = create_paypal_order(
@@ -1097,6 +1114,7 @@ def checkout_suggestions_dialog():
         except (RuntimeError, ValueError) as error:
             st.error(str(error))
         else:
+            interaction_log.save_order_items(DATABASE_PATH, order_id, st.session_state.cart)
             st.session_state.paypal_order_id = order_id
             st.session_state.paypal_approval_url = approval_url
             st.rerun()
@@ -1117,6 +1135,9 @@ def checkout_suggestions_dialog():
 if "page" not in st.session_state:
     st.session_state.page = "Home"
 initialize_database()
+interaction_log.init(DATABASE_PATH)
+if "session_id" not in st.session_state:
+    st.session_state.session_id = uuid.uuid4().hex[:12]
 if "authenticated_user" not in st.session_state:
     st.session_state.authenticated_user = None
 if "category_filter" not in st.session_state:
@@ -1167,7 +1188,7 @@ if (
             )
             signup_submitted = st.form_submit_button(
                 "Create account",
-                use_container_width=True,
+                width="stretch",
             )
         if signup_submitted:
             if signup_password != confirm_password:
@@ -1202,7 +1223,7 @@ if (
             )
             login_submitted = st.form_submit_button(
                 "Log in",
-                use_container_width=True,
+                width="stretch",
             )
         if login_submitted:
             user = authenticate_user(login_email, login_password)
@@ -1254,7 +1275,7 @@ if st.session_state.authenticated_user is None:
     st.sidebar.caption("Browsing as guest")
 else:
     st.sidebar.caption(f"Signed in as {st.session_state.authenticated_user['full_name']}")
-    if st.sidebar.button("Log out", key="logout_button", use_container_width=True):
+    if st.sidebar.button("Log out", key="logout_button", width="stretch"):
         mark_paypal_order_cancelled(
             st.session_state.paypal_order_id,
             st.session_state.authenticated_user["id"],
@@ -1281,7 +1302,7 @@ for page in pages:
             key=f"navigate_{page.lower().replace(' ', '_')}",
             on_click=navigate_to_page,
             args=(page,),
-            use_container_width=True,
+            width="stretch",
         )
 
 if "paypal_notice" in st.session_state:
@@ -1350,7 +1371,7 @@ if st.session_state.page == "Home":
                 st.button(
                     category,
                     key=f"category_{category}",
-                    use_container_width=True,
+                    width="stretch",
                     on_click=navigate_to_category,
                     args=(category,),
                 )
@@ -1385,7 +1406,7 @@ if st.session_state.page == "Home":
                         st.button(
                             category,
                             key=f"category_{category}",
-                            use_container_width=True,
+                            width="stretch",
                             on_click=navigate_to_category,
                             args=(category,),
                         )
@@ -1498,6 +1519,10 @@ elif st.session_state.page == "Recommendations":
         st.subheader("Find Similar Products")
         selected_prod = st.selectbox("Choose a product", df["Name"], key="rec_product_select")
         if st.button("Recommend Similar Products", key="btn_rec_product"):
+            interaction_log.log_event(
+                DATABASE_PATH, current_actor(),
+                int(df.loc[df["Name"] == selected_prod, "ProductID"].iloc[0]), "view",
+            )
             rec = recommend(selected_prod)
             st.session_state.recommended_product_ids = rec["ProductID"].astype(str).tolist()
 
@@ -1510,6 +1535,9 @@ elif st.session_state.page == "Recommendations":
             )
             with st.container(key="recommendations-results"):
                 render_product_cards(rec_df)
+
+        st.markdown('<div class="section-title">Picked for you</div>', unsafe_allow_html=True)
+        render_product_cards(personal_recommendations(), key_prefix="for-you-")
 
 elif st.session_state.page == "Cart":
     st.header("Your Cart")
@@ -1541,7 +1569,7 @@ elif st.session_state.page == "Cart":
                     key=f"cart_decrease_{product_id}",
                     on_click=change_cart_quantity,
                     args=(product_id, -1),
-                    use_container_width=True,
+                    width="stretch",
                 )
             with qty_col:
                 st.markdown(f'<div class="cart-quantity">{quantity}</div>', unsafe_allow_html=True)
@@ -1551,7 +1579,7 @@ elif st.session_state.page == "Cart":
                     key=f"cart_increase_{product_id}",
                     on_click=change_cart_quantity,
                     args=(product_id, 1),
-                    use_container_width=True,
+                    width="stretch",
                 )
             with sum_col:
                 st.markdown(f"**R {line_total:,.2f}**")
@@ -1576,7 +1604,7 @@ elif st.session_state.page == "Cart":
                 f"Checkout confirmed. Your total, including delivery, is "
                 f"R {total + delivery_fee:,.2f}. Your cart has been kept."
             )
-        elif st.button("Checkout", key="checkout_button", use_container_width=True):
+        elif st.button("Checkout", key="checkout_button", width="stretch"):
             if st.session_state.authenticated_user is None:
                 st.session_state.checkout_after_auth = True
                 st.session_state.page = "Account"
@@ -1585,92 +1613,8 @@ elif st.session_state.page == "Cart":
             st.rerun()
 
 elif st.session_state.page == "Data Analysis":
-    st.header("Dataset Overview")
-    st.dataframe(with_rand_prices(df), use_container_width=True)
-    st.subheader("Products per Category")
-    category_counts = (
-        df["Category"].value_counts().rename_axis("Category")
-        .reset_index(name="Products")
-    )
-    color_encoding = {
-        "field": "Category",
-        "type": "nominal",
-        "scale": {
-            "domain": CATEGORIES,
-            "range": [CATEGORY_COLORS[category] for category in CATEGORIES],
-        },
-        "legend": {"title": "Category"},
-    }
-    bar_chart, pie_chart = st.columns(2)
-    with bar_chart:
-        st.vega_lite_chart(
-            category_counts,
-            {
-                "mark": "bar",
-                "encoding": {
-                    "x": {
-                        "field": "Category",
-                        "type": "nominal",
-                        "sort": CATEGORIES,
-                        "axis": {"title": "Category", "labelAngle": -45},
-                    },
-                    "y": {
-                        "field": "Products",
-                        "type": "quantitative",
-                        "axis": {"title": "Number of products"},
-                    },
-                    "color": color_encoding,
-                    "tooltip": [
-                        {"field": "Category", "type": "nominal"},
-                        {"field": "Products", "type": "quantitative"},
-                    ],
-                },
-            },
-            use_container_width=True,
-        )
-
-    with pie_chart:
-        st.vega_lite_chart(
-            category_counts,
-            {
-                "mark": {"type": "arc", "outerRadius": 115},
-                "encoding": {
-                    "theta": {"field": "Products", "type": "quantitative"},
-                    "color": color_encoding,
-                    "tooltip": [
-                        {"field": "Category", "type": "nominal"},
-                        {"field": "Products", "type": "quantitative"},
-                    ],
-                },
-            },
-            use_container_width=True,
-        )
-
-    st.subheader("Category Counts Across Categories")
-    st.vega_lite_chart(
-        category_counts,
-        {
-            "mark": {"type": "line", "point": True, "color": "#541a2e"},
-            "encoding": {
-                "x": {
-                    "field": "Category",
-                    "type": "nominal",
-                    "sort": CATEGORIES,
-                    "axis": {"title": "Category", "labelAngle": -45},
-                },
-                "y": {
-                    "field": "Products",
-                    "type": "quantitative",
-                    "axis": {"title": "Number of products"},
-                },
-                "tooltip": [
-                    {"field": "Category", "type": "nominal"},
-                    {"field": "Products", "type": "quantitative"},
-                ],
-            },
-        },
-        use_container_width=True,
-    )
+    st.header("Store & Recommender Statistics")
+    render_stats(df, DATABASE_PATH, get_recommender())
 
 if st.session_state.cart and st.session_state.page in {
     "Home",
