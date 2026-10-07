@@ -1,27 +1,40 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
+from pathlib import Path
 import joblib
+import numpy as np
+import pandas as pd
+import streamlit as st
 
-# Set Page Config
+# -----------------------------
+# DYNAMIC BASE DIRECTORY PATH
+# -----------------------------
+# Automatically targets the 'shopsmart/UbuntuCo' directory on Streamlit Cloud
+BASE_DIR = Path(__file__).resolve().parent
+
+# -----------------------------
+# PAGE CONFIGURATION
+# -----------------------------
 st.set_page_config(
     page_title="ShopSmart Recommendation System",
     page_icon="🛒",
-    layout="wide"
+    layout="wide",
 )
 
 st.title("🛍️ ShopSmart")
 st.subheader("Hybrid E-commerce Product Recommendation Engine")
 
-# Load preprocessed files and saved models
+
+# -----------------------------
+# LOAD ARTIFACTS & DATASETS
+# -----------------------------
 @st.cache_data
 def load_artifacts():
-    customers = pd.read_csv("customers_clean.csv")
-    sd = pd.read_csv("sd_clean.csv")
-    content_scores = joblib.load("content_scores.pkl")
-    profile_scaled = joblib.load("profile_scaled.pkl")
-    knn = joblib.load("knn_model.pkl")
-    return customers, sd, content_scores, profile_scaled, knn
+  customers = pd.read_csv(BASE_DIR / "customers_clean.csv")
+  sd = pd.read_csv(BASE_DIR / "sd_clean.csv")
+  content_scores = joblib.load(BASE_DIR / "content_scores.pkl")
+  profile_scaled = joblib.load(BASE_DIR / "profile_scaled.pkl")
+  knn = joblib.load(BASE_DIR / "knn_model.pkl")
+  return customers, sd, content_scores, profile_scaled, knn
+
 
 customers, sd, content_scores, profile_scaled, knn = load_artifacts()
 
