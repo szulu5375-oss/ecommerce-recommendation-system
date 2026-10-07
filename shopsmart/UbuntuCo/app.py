@@ -1,4 +1,3 @@
-
 import base64
 from contextlib import contextmanager
 import hashlib
@@ -374,6 +373,28 @@ def process_paypal_return():
         )
         st.query_params.clear()
         return
+    
+ # -----------------------------
+# LOAD DATA & RECOMMENDATIONS
+# -----------------------------
+@st.cache_data
+def load_all_data():
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    
+    # Load Main Products Data
+    products_path = os.path.join(BASE_DIR, "products.csv")
+    df_products = pd.read_csv(products_path)
+    
+    # Load Precomputed Hybrid Recommendations from Colab
+    recs_path = os.path.join(BASE_DIR, "Customer_Recommendations.csv")
+    if os.path.exists(recs_path):
+        df_recs = pd.read_csv(recs_path)
+    else:
+        df_recs = pd.DataFrame()
+        
+    return df_products, df_recs
+
+df, df_customer_recs = load_all_data()
 
     order_id = st.query_params.get("token")
     if not order_id:
@@ -1417,22 +1438,69 @@ elif st.session_state.page == "Promotions":
     render_product_cards(discounted)
 
 elif st.session_state.page == "Recommendations":
-    st.header("Get Recommendations")
-    selected = st.selectbox("Choose a product", df["Name"])
-    if st.button("Recommend Similar Products"):
-        rec = recommend(selected)
-        st.session_state.recommended_product_ids = (
-            rec["ProductID"].astype(str).tolist()
-        )
-    if st.session_state.recommended_product_ids:
-        rec = (
-            df.assign(_product_id=df["ProductID"].astype(str))
-            .set_index("_product_id")
-            .loc[st.session_state.recommended_product_ids]
-            .reset_index(drop=True)
-        )
-        with st.container(key="recommendations-results"):
-            render_product_cards(rec)
+    st.header("🎯 AI Recommendation Engine")
+    
+    tab1, tab2 = st.tabs(["👤 Customer Recommendations", "📦 Product-Based Recommendations"])
+    
+    # TAB 1: User-Based Hybrid Recommendations from Colab
+    with tab1:
+        st.subheader("Personalized Customer Recommendations")
+        if df_customer_recs.empty:
+            st.warning("Customer recommendations dataset ('Customer_Recommendations.csv') not found in project folder.")
+        else:
+            customer_ids = df_customer_recs["CustomerID"].astype(str).unique()
+            
+            # Default selection to signed-in user if available
+            default_index = 0
+            if st.session_state.get("authenticated_user"):
+                user_id_str = str(st.session_state.authenticated_user.get("id"))
+                if user_id_str in customer_ids:
+                    default_index = int(np.where(customer_ids == user_id_str)[0][0])
+            
+            selected_cust_id = st.selectbox(
+                "Select or Enter Customer ID:",
+                options=customer_ids,
+                index=default_index,
+                key="rec_customer_select"
+            )
+            
+            cust_rec_row = df_customer_recs[df_customer_recs["CustomerID"].astype(str) == selected_cust_id]
+            
+            if not cust_rec_row.empty:
+                row = cust_rec_row.iloc[0]
+                st.markdown(f"### Top Recommended Categories for Customer `{selected_cust_id}`")
+                
+                rec_cols = st.columns(3)
+                for rank in range(1, 4):
+                    prod_col = f"Rec_{rank}_Product"
+                    code_col = f"Rec_{rank}_StockCode"
+                    score_col = f"Rec_{rank}_Score"
+                    
+                    if prod_col in row:
+                        with rec_cols[rank - 1]:
+                            st.markdown(f"#### 🏆 Rank {rank}")
+                            st.metric(label="Category / Product", value=str(row[prod_col]))
+                            st.write(f"**StockCode:** `{row.get(code_col, 'N/A')}`")
+                            if score_col in row:
+                                st.write(f"**Match Score:** `{float(row[score_col]):.4f}`")
+
+    # TAB 2: Item-Based Content Recommendations
+    with tab2:
+        st.subheader("Find Similar Products")
+        selected_prod = st.selectbox("Choose a product", df["Name"], key="rec_product_select")
+        if st.button("Recommend Similar Products", key="btn_rec_product"):
+            rec = recommend(selected_prod)
+            st.session_state.recommended_product_ids = rec["ProductID"].astype(str).tolist()
+            
+        if st.session_state.get("recommended_product_ids"):
+            rec_df = (
+                df.assign(_product_id=df["ProductID"].astype(str))
+                .set_index("_product_id")
+                .loc[st.session_state.recommended_product_ids]
+                .reset_index(drop=True)
+            )
+            with st.container(key="recommendations-results"):
+                render_product_cards(rec_df)
 
 elif st.session_state.page == "Cart":
     st.header("Your Cart")
