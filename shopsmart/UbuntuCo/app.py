@@ -181,6 +181,15 @@ def get_paypal_configuration():
         )
     if environment not in {"sandbox", "live"}:
         raise ValueError("PAYPAL_ENVIRONMENT must be either 'sandbox' or 'live'.")
+    if client_id.startswith("YOUR_") or client_secret.startswith("YOUR_"):
+        raise ValueError(
+            "PayPal Sandbox keys are still the placeholders. Paste your Sandbox "
+            "Client ID and Secret into .streamlit/secrets.toml and restart the app."
+        )
+    # PayPal does not support ZAR, so carts (priced in Rand) are charged in USD.
+    zar_per_usd = float(
+        os.environ.get("PAYPAL_ZAR_PER_USD") or paypal_secrets.get("zar_per_usd", 18.0)
+    )
 
     return {
         "client_id": client_id,
@@ -192,6 +201,7 @@ def get_paypal_configuration():
         ),
         "return_url": return_url,
         "cancel_url": cancel_url,
+        "zar_per_usd": zar_per_usd,
     }
 
 
@@ -245,7 +255,8 @@ def paypal_api_request(method, path, payload=None):
 
 def create_paypal_order(user_id, amount_cents):
     configuration = get_paypal_configuration()
-    amount = f"{amount_cents / 100:.2f}"
+    # amount_cents is in Rand; PayPal is charged the USD equivalent
+    amount = f"{max(amount_cents / 100 / configuration['zar_per_usd'], 0.01):.2f}"
     order = paypal_api_request(
         "POST",
         "/v2/checkout/orders",
@@ -254,7 +265,7 @@ def create_paypal_order(user_id, amount_cents):
             "purchase_units": [
                 {
                     "amount": {
-                        "currency_code": "ZAR",
+                        "currency_code": "USD",
                         "value": amount,
                     }
                 }
@@ -335,6 +346,15 @@ def capture_paypal_order(order_id, user_id):
         )
 
 
+def get_paypal_order_owner(order_id):
+    with get_database_connection() as connection:
+        row = connection.execute(
+            "SELECT user_id FROM paypal_orders WHERE order_id = ?",
+            (order_id,),
+        ).fetchone()
+    return row["user_id"] if row else None
+
+
 def mark_paypal_order_cancelled(order_id, user_id):
     if not order_id or not user_id:
         return
@@ -387,20 +407,24 @@ def process_paypal_return():
     if not order_id:
         return
 
-    # Customer approved payment on PayPal
-    if user is None:
+    # Customer approved payment on PayPal.
+    # PayPal sends the browser back as a NEW Streamlit session, so the customer is
+    # usually logged out here. The order row in our database records who owns it,
+    # so we capture it for that account instead of losing the payment.
+    owner_id = user["id"] if user else get_paypal_order_owner(order_id)
+    if owner_id is None:
         st.session_state.paypal_notice = (
             "error",
-            "Log in to the account used for this PayPal checkout to confirm payment.",
+            "We could not find this PayPal order. Please try checking out again.",
         )
         st.query_params.clear()
         return
     try:
-        capture_paypal_order(order_id, user["id"])
+        capture_paypal_order(order_id, owner_id)
     except (RuntimeError, ValueError) as error:
         st.session_state.paypal_notice = ("error", str(error))
     else:
-        interaction_log.log_purchases_for_order(DATABASE_PATH, order_id, f"u_{user['id']}")
+        interaction_log.log_purchases_for_order(DATABASE_PATH, order_id, f"u_{owner_id}")
         st.session_state.cart = {}
         st.session_state.page = "Home"
         st.session_state.checkout_confirmed = False
@@ -1097,6 +1121,15 @@ def checkout_suggestions_dialog():
             approval_url,
             width="stretch",
         )
+        try:
+            rate = get_paypal_configuration()["zar_per_usd"]
+            usd_total = cart_total_cents(st.session_state.cart) / 100 / rate
+            st.caption(
+                f"PayPal does not support Rand, so you will be charged about "
+                f"USD {usd_total:,.2f} (R {rate:g} = USD 1)."
+            )
+        except ValueError:
+            pass
         st.caption(
             "Add or select your card securely on PayPal. ShopSmart does not "
             "collect or store card numbers or security codes."
