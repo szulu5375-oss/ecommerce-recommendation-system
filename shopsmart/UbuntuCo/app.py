@@ -431,7 +431,7 @@ def process_paypal_return():
 
 process_paypal_return()
     
-    
+st.markdown(  
     """
     <style>
     :root {
