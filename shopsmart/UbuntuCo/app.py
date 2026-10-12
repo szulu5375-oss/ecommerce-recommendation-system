@@ -1,13 +1,17 @@
-
 import base64
 import os
 
+import requests 
+import numpy as np # NEW
 import streamlit as st
 import pandas as pd
 from html import escape
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+# NEW: address of the FastAPI recommender (set RECOMMENDER_API_URL when deployed)
+API_URL = os.getenv("RECOMMENDER_API_URL", "http://127.0.0.1:8000")
 
 # -----------------------------
 # PAGE SETTINGS
@@ -422,6 +426,12 @@ CATEGORY_COLORS = {
 df["Description"] = df["Description"].fillna("")
 df["Category"] = df["Category"].fillna("")
 
+# NEW: StockCode links each ShopSmart product to the recommender's data.
+# If the column is missing, the app still runs and uses the TF-IDF fallback.
+if "StockCode" not in df.columns:
+    df["StockCode"] = ""
+df["StockCode"] = df["StockCode"].fillna("").astype(str).str.strip()
+
 # Feature Engineering
 df["Features"] = df["Category"] + " " + df["Description"]
 
@@ -433,10 +443,11 @@ feature_matrix = vectorizer.fit_transform(df["Features"])
 similarity = cosine_similarity(feature_matrix)
 
 # -----------------------------
-# RECOMMENDATION FUNCTION
+# RECOMMENDATION FUNCTIONS
 # (must be defined BEFORE the if/elif page chain)
 # -----------------------------
-def recommend_for_cart(cart, top_n=5):
+# Original TF-IDF recommender, kept as a fallback
+def recommend_for_cart_tfidf(cart, top_n=5):
     product_positions = {
         str(product_id): position
         for position, product_id in enumerate(df["ProductID"])
@@ -459,6 +470,149 @@ def recommend_for_cart(cart, top_n=5):
         reverse=True,
     )
     return df.iloc[ranked_positions[:top_n]]
+
+
+# ---- Two-stage recommender: model scores product TYPES, catalog supplies ITEMS ----
+MATCH_THRESHOLD = 0.15      # min text similarity to auto-map a catalog item to a type
+W_TYPE, W_SIM, W_DISC = 0.6, 0.3, 0.1   # ranking weights (type score, cart similarity, discount)
+MAX_PER_TYPE = 1            # variety: at most this many items per product type in the top N
+EXCLUDE_CART_TYPES = True   # don't recommend more items of a type already in the cart
+
+
+def get_model_types():
+    """Fetch the model's product types from the API (only cached when successful)."""
+    if st.session_state.get("model_types"):
+        return st.session_state.model_types
+    try:
+        response = requests.get(f"{API_URL}/types", timeout=30)
+        response.raise_for_status()
+        types = response.json()["types"]
+    except (requests.RequestException, KeyError, ValueError):
+        return []
+    st.session_state.model_types = types
+    return types
+
+
+def map_catalog_to_types(types):
+    """Map each catalog row to one of the model's product types (or None)."""
+    names = [t["product"] for t in types]
+    lowered = {n.lower(): n for n in names}
+
+    # 1) manual mapping, if products.csv has a ModelProduct column
+    if "ModelProduct" in df.columns:
+        mapped = df["ModelProduct"].fillna("").astype(str).str.strip().str.lower().map(lowered)
+    else:
+        mapped = pd.Series([None] * len(df), index=df.index, dtype=object)
+
+    # 2) automatic mapping by text similarity for anything still unmapped
+    texts = (df["Name"].astype(str) + " " + df["Description"]).tolist()
+    vec = TfidfVectorizer(stop_words="english").fit(texts + names)
+    sims = cosine_similarity(vec.transform(texts), vec.transform(names))
+    auto = [
+        names[best] if value >= MATCH_THRESHOLD else None
+        for best, value in zip(sims.argmax(axis=1), sims.max(axis=1))
+    ]
+    auto = pd.Series(auto, index=df.index, dtype=object)
+    return mapped.where(mapped.notna(), auto)
+
+
+def get_catalog_types():
+    types = get_model_types()
+    if not types:
+        return None
+    if "catalog_types" not in st.session_state:
+        st.session_state.catalog_types = map_catalog_to_types(types)
+    return st.session_state.catalog_types
+
+
+def _minmax(values):
+    values = np.asarray(values, dtype=float)
+    span = values.max() - values.min() if values.size else 0
+    return (values - values.min()) / span if span > 0 else np.zeros_like(values)
+
+
+def _recommend_expanded(cart, top_n):
+    model_product = get_catalog_types()
+    if model_product is None:
+        return None
+
+    positions = {str(pid): i for i, pid in enumerate(df["ProductID"])}
+    cart_pos, cart_qty, api_items = [], [], {}
+    for pid, qty in cart.items():
+        if pid in positions and qty > 0:
+            i = positions[pid]
+            cart_pos.append(i)
+            cart_qty.append(qty)
+            t = model_product.iloc[i]
+            if isinstance(t, str) and t:
+                api_items[t] = api_items.get(t, 0) + qty
+    if not cart_pos or not api_items:
+        return None  # no cart item maps to a model product
+
+    response = requests.post(
+        f"{API_URL}/score",
+        json={"cart": [{"item": t, "quantity": q} for t, q in api_items.items()]},
+        timeout=30,
+    )
+    response.raise_for_status()
+    rows = response.json()["scores"]
+    type_scores = {r["product"]: r["score"] for r in rows}
+    cart_types = {r["product"] for r in rows if r["in_cart"]}
+
+    # candidates: every catalog item not in the cart (optionally not of a cart type)
+    cart_set = set(cart_pos)
+    cand = np.array([i for i in range(len(df)) if i not in cart_set])
+    if EXCLUDE_CART_TYPES and cand.size:
+        keep = ~model_product.iloc[cand].isin(cart_types).to_numpy()
+        cand = cand[keep]
+    if cand.size == 0:
+        return None
+
+    # score = model score of the item's type + similarity to cart items + discount
+    names = list(type_scores)
+    norm = dict(zip(names, _minmax([type_scores[n] for n in names])))
+    type_score = model_product.map(norm).fillna(0.0).to_numpy()[cand]
+    sim_raw = similarity[cart_pos].T.dot(cart_qty)
+    sim_score = _minmax(sim_raw[cand])
+    if "DiscountPercent" in df.columns:
+        disc = pd.to_numeric(df["DiscountPercent"], errors="coerce").fillna(0).to_numpy()
+        disc_score = _minmax(disc[cand])
+    else:
+        disc_score = np.zeros(len(cand))
+    final = W_TYPE * type_score + W_SIM * sim_score + W_DISC * disc_score
+    order = cand[np.argsort(-final)]
+
+    # pick top N, with variety across product types
+    chosen, used = [], {}
+    for i in order:
+        t = model_product.iloc[i]
+        key = t if isinstance(t, str) else f"item-{i}"
+        if used.get(key, 0) >= MAX_PER_TYPE:
+            continue
+        chosen.append(i)
+        used[key] = used.get(key, 0) + 1
+        if len(chosen) == top_n:
+            break
+    for i in order:  # fill if variety rule left us short
+        if len(chosen) == top_n:
+            break
+        if i not in chosen:
+            chosen.append(i)
+    return df.iloc[chosen].reset_index(drop=True)
+
+
+# Returns (recommended_products, source): "hybrid", "fallback" or "none"
+def recommend_for_cart(cart, top_n=3):
+    if not cart:
+        return df.iloc[0:0], "none"
+    try:
+        rec = _recommend_expanded(cart, top_n)
+        if rec is not None and not rec.empty:
+            return rec, "hybrid"
+    except (requests.RequestException, KeyError, ValueError):
+        pass
+    return recommend_for_cart_tfidf(cart, top_n), "fallback"
+
 
 def product_icon(name, category):
     name = str(name).lower()
@@ -850,11 +1004,14 @@ elif st.session_state.page == "Recommendations":
     if not cart:
         st.info("Add products to your cart to see personalised recommendations.")
     else:
-        rec = recommend_for_cart(cart)
+        rec, source = recommend_for_cart(cart)
         if rec.empty:
             st.info("No additional products to recommend right now.")
         else:
-            st.caption("Based on the products in your cart")
+            if source == "fallback":
+                st.caption("Showing similar products (recommendation service unavailable)")
+            else:
+                st.caption("Top picks based on the products in your cart")
             with st.container(key="recommendations-results"):
                 render_product_cards(rec)
 
@@ -999,3 +1156,16 @@ elif st.session_state.page == "Data Analysis":
         },
         use_container_width=True,
     )
+
+    st.subheader("Catalog to model-product mapping")
+    catalog_types = get_catalog_types()
+    if catalog_types is None:
+        st.info("Recommendation service not reachable.")
+    else:
+        st.dataframe(
+            pd.DataFrame({
+                "Name": df["Name"],
+                "Model product": catalog_types.fillna("— unmapped"),
+            }),
+            use_container_width=True,
+        )
